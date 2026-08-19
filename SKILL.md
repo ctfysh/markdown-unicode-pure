@@ -1,5 +1,5 @@
 ---
-name: markdown-subsup-strict
+name: markdown-unicode-pure
 description: 严禁所有 Unicode 特殊字符（上下标、数学符号、希腊字母等），统一使用 ASCII + Markdown/LaTeX 语法。
 ---
 
