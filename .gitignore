@@ -14,3 +14,8 @@ __pycache__/
 
 # Darwin optimization drafts
 *.bak.*
+
+# Darwin optimization artifacts (regenerated each round)
+result-card.html
+result-card.png
+results.tsv
