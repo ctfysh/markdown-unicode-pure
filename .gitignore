@@ -9,6 +9,8 @@
 # Runtime / logs
 node_modules/
 *.log
+__pycache__/
+*.pyc
 
 # Darwin optimization drafts
 *.bak.*
