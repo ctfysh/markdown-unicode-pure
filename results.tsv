@@ -6,5 +6,5 @@ timestamp	commit	skill	old_score	new_score	status	dimension	note	eval_mode
 2026-08-20T09:45	5e5a55d	markdown-unicode-pure	self	self	keep	dim5	L56 数学公式示例修正: E=mc² 无运算符属 Markdown 优先, 仅含运算符公式才进 LaTeX（主 session 自评）	dry_run
 2026-08-20T10:00	final	markdown-unicode-pure	66.7	77.3	keep	dim5,7,8	优化后主 session 自评 77.3（+10.6）：7 处矛盾修复 + Greek 全标记；dim4 仍为最大短板（1.8/6）	paired
 2026-08-20T10:30	5c84c58	markdown-unicode-pure	77.3	79.1	keep	dim4	补 2 个显性 🔴 CHECKPOINT（--in-place 备份 + 全局语义改写确认），dim4 3→6	paired
-2026-08-20T11:00	2284fe2	markdown-unicode-pure	79.1	80.3	keep	dim8	GREEK_LATEX 映射修复 amb.json suggestion（\$eta\$→\$ta\$），dim8 8→9，脚本确定性 full_test 发现	paired
-2026-08-20T11:30	a41139e	markdown-unicode-pure	80.3	83.3	keep	dim5+dim7	· 判定明确化（文本分隔→. / 乘法→$\cdot$），dim5 8→9、dim7 8→9，脚本同步消除 doc-script 不一致	paired
+2026-08-20T11:00	2284fe2	markdown-unicode-pure	79.1	81.4	keep	dim8	GREEK_LATEX 映射修复 amb.json suggestion（\$eta\$→\$ta\$），dim8 8→9 (+2.3, 权重23)，脚本确定性 full_test 发现	paired
+2026-08-20T11:30	a41139e	markdown-unicode-pure	81.4	84.4	keep	dim5+dim7	· 判定明确化（文本分隔→. / 乘法→$\cdot$），dim5 8→9、dim7 8→9，脚本同步消除 doc-script 不一致	paired
