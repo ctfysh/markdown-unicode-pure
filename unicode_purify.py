@@ -200,6 +200,21 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
                 out_len += 1
                 i += 1
                 continue
+            # · between text/words (北京·上海) → ASCII . (text separator);
+            # between values/units (kg·m/s, 5·10³) → $\cdot$ (multiplication)
+            if ch == "·":
+                prev_ch = text[i - 1] if i > 0 else ""
+                next_ch = text[i + 1] if i + 1 < n else ""
+                is_text_sep = (prev_ch.isalpha() and not prev_ch.isascii()) or \
+                              (next_ch.isalpha() and not next_ch.isascii())
+                if is_text_sep:
+                    out.append(".")
+                    out_len += 1
+                else:
+                    out.append(INLINE_OPS[ch])
+                    out_len += len(INLINE_OPS[ch])
+                i += 1
+                continue
             # ±/∓ followed by a number: absorb value into one math block ($\pm 2\%$)
             if ch in ("±", "∓") and VALUE_AFTER_SIGN.match(text, i):
                 m = VALUE_AFTER_SIGN.match(text, i)
