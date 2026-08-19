@@ -71,6 +71,7 @@ python3 unicode_purify.py <input> -o <output> --amb-out amb.json
 
 | 场景 | 规则 |
 |------|------|
+| 全 ASCII 文本（`m/s`、`kg`、`10 cm`） | **原样保留，不转换**（无 Unicode 就无需任何处理） |
 | `×` 在尺寸描述中（如 `2.0 m × 1.4 m`） | 转纯 ASCII `x`（`2.0 m x 1.4 m`），不进 LaTeX |
 | `×` 在数学公式中 | 用 `$\times$`（如 `$A = l \times w$`） |
 | `·` 两侧是单位/量值（`kg·m/s`、`5 · 10³`） | 整体进 LaTeX，单位正体 `\mathrm{}`（`$\mathrm{kg}\cdot\mathrm{m}/\mathrm{s}$`、`$5 \cdot 10^{3}$`） |
