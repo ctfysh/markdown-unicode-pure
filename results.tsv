@@ -5,3 +5,4 @@ timestamp	commit	skill	old_score	new_score	status	dimension	note	eval_mode
 2026-08-20T09:30	513eea6	markdown-unicode-pure	66.7	self	keep	dim5,7,8	修正 SKILL.md 常见错误表 3 处 + test-prompts 3 处 + 脚本 Greek 全标记（主 session 自评，绝对分仅 triage）	paired
 2026-08-20T09:45	5e5a55d	markdown-unicode-pure	self	self	keep	dim5	L56 数学公式示例修正: E=mc² 无运算符属 Markdown 优先, 仅含运算符公式才进 LaTeX（主 session 自评）	dry_run
 2026-08-20T10:00	final	markdown-unicode-pure	66.7	77.3	keep	dim5,7,8	优化后主 session 自评 77.3（+10.6）：7 处矛盾修复 + Greek 全标记；dim4 仍为最大短板（1.8/6）	paired
+2026-08-20T10:30	5c84c58	markdown-unicode-pure	77.3	79.1	keep	dim4	补 2 个显性 🔴 CHECKPOINT（--in-place 备份 + 全局语义改写确认），dim4 3→6	paired
