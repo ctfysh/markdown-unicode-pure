@@ -3,3 +3,4 @@ timestamp	commit	skill	old_score	new_score	status	dimension	note	eval_mode
 2026-08-19T10:15	ec7aa88	markdown-unicode-pure	76.7	2-0 better	keep	dim3	添加失败模式fallback表	paired
 2026-08-19T11:00	e3206d7	markdown-unicode-pure	2-0 better	2-0 better	keep	dim2,5,7,9	重构压缩: 决策树前置+合并表格+新增反例清单, 130→92行	paired
 2026-08-20T09:30	513eea6	markdown-unicode-pure	66.7	self	keep	dim5,7,8	修正 SKILL.md 常见错误表 3 处 + test-prompts 3 处 + 脚本 Greek 全标记（主 session 自评，绝对分仅 triage）	paired
+2026-08-20T09:45	5e5a55d	markdown-unicode-pure	self	self	keep	dim5	L56 数学公式示例修正: E=mc² 无运算符属 Markdown 优先, 仅含运算符公式才进 LaTeX（主 session 自评）	dry_run
