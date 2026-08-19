@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+
+# Runtime / logs
+node_modules/
+*.log
+
+# Darwin optimization drafts
+*.bak.*
