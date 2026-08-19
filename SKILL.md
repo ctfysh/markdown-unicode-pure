@@ -14,7 +14,7 @@ python3 unicode_purify.py <input> -o <output> --amb-out amb.json
 ```
 
 - 脚本处理：数学运算符、标点、单位上标（`m²`→`m^2^`）、化学下标（`H₂O`→`H~2~O`）、尺寸 `×`→`x`、`·` 乘积表达式整体进 LaTeX（`kg·m/s`→`$\mathrm{kg}\cdot\mathrm{m}/\mathrm{s}$`）
-- 脚本无法判断（标注 `[AMBIGUOUS]` 或写入 amb.json）：希腊字母数学 vs 文本（`η`）、数学 vs 单位的上下标、`×` 尺寸 vs 乘法、`·` 分隔 vs 乘法、`·` 乘积中的字母是单位还是变量（默认按单位正体，若为变量改斜体）
+- 脚本无法判断（标注 `[AMBIGUOUS]` 或写入 amb.json）：希腊字母数学 vs 文本（`η`）、数学 vs 单位的上下标、`×` 尺寸 vs 乘法、`·` 中文间隔号 vs 数学乘法（中文语境保留，非中文语境默认 `$\cdot$`）、`·` 乘积中的字母是单位还是变量（默认按单位正体，若为变量改斜体）
 - 对 amb.json 每个条目，按下方决策树判断后替换（如 `效率 eta`→`效率 $\eta$`）
 - 无脚本环境（或单段文本）：直接按下方规则转换
 
@@ -43,7 +43,7 @@ python3 unicode_purify.py <input> -o <output> --amb-out amb.json
 | `±` | `$\pm$` | `≠` | `$\neq$` | `∫` | `$\int$` |
 | `∓` | `$\mp$` | `≈` | `$\approx$` | `∂` | `$\partial$` |
 | `·` | `$\cdot$` | `≡` | `$\equiv$` | `∇` | `$\nabla$` |
-| `−` | `$-$` | `∞` | `$\infty$` | `√` | `$\sqrt{}$` |
+| `−` | `$-$` | `∞` | `$\infty$` | `√` | `$\sqrt{5}$`（带参数） |
 | `∈` | `$\in$` | `∉` | `$\notin$` | `∀` | `$\forall$` |
 | `⊂` | `$\subset$` | `⊃` | `$\supset$` | `∃` | `$\exists$` |
 | `∪` | `$\cup$` | `∩` | `$\cap$` | `∅` | `$\emptyset$` |
@@ -75,7 +75,8 @@ python3 unicode_purify.py <input> -o <output> --amb-out amb.json
 | `×` 在尺寸描述中（如 `2.0 m × 1.4 m`） | 转纯 ASCII `x`（`2.0 m x 1.4 m`），不进 LaTeX |
 | `×` 在数学公式中 | 用 `$\times$`（如 `$A = l \times w$`） |
 | `·` 两侧是单位/量值（`kg·m/s`、`5 · 10³`） | 整体进 LaTeX，单位正体 `\mathrm{}`（`$\mathrm{kg}\cdot\mathrm{m}/\mathrm{s}$`、`$5 \cdot 10^{3}$`） |
-| `·` 两侧是普通文字（`北京·上海`） | 分隔 → `.`（`北京.上海`） |
+| `·` 两侧是中文（`北京·上海`、`列夫·托尔斯泰`） | **中文间隔号，保留原样**（与 `，`、`。` 同属中文标点，U+00B7 合法 Unicode） |
+| `√` 后接参数（`√5`、`√x`、`√(x+1)`） | 整体进 LaTeX `$\sqrt{5}$`、`$\sqrt{x}$`、`$\sqrt{(x+1)}$`；参数后的上标仍用 Markdown（`√x²`→`$\sqrt{x}$^2^`） |
 | `±2%` 等符号+数值 | 整体进 LaTeX `$\pm 2\%$`（`%` 须转义 `\%`，勿拆散） |
 | `10^6^ kg` 等数量级+单位 | 用 `^ ^`，不进 LaTeX |
 
@@ -84,7 +85,7 @@ python3 unicode_purify.py <input> -o <output> --amb-out amb.json
 | 触发条件 | 一线修复 | 兜底 |
 |----------|---------|------|
 | 未列出的 Unicode 字符 | 按决策树判断归属 | 标注 `[UNRESOLVED: U+XXXX]` |
-| 字符歧义（如 `·`） | 检查上下文 | 默认转 LaTeX `$\cdot$` |
+| 字符歧义（如 `·`） | 检查上下文 | 中文语境保留 `·`；其他默认 `$\cdot$` |
 | LaTeX 语法不确定 | 按表格查表转换 | 标注 `[CHECK: ???]` |
 | 输入无 Unicode 问题 | 原文输出 | — |
 | 脚本已跑但歧义未决（amb.json 条目） | 按决策树逐条判断 | 无法判断则保留并标注 `[UNRESOLVED: U+XXXX]` |

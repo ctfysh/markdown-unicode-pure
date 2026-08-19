@@ -101,6 +101,9 @@ SUPER_RE = re.compile("[" + "".join(SUPERSCRIPT_MAP) + "]")
 SUB_RE = re.compile("[" + "".join(SUBSCRIPT_MAP) + "]")
 # ±/∓ immediately followed by a value (digits, optional %, optional unit)
 VALUE_AFTER_SIGN = re.compile(r"[±∓]\s*(\d[\d.,]*\s*%?)")
+# √ + immediate argument: ASCII digits/letters/dot, or a parenthesized
+# expression; ASCII-only so superscripts (√x²) stay out of the radical
+SQRT_ARG_RE = re.compile(r"√\s*([0-9A-Za-z_.]+|\([^)]*\))")
 
 # Anything non-ASCII that we did not resolve (excluding CJK and CJK punct)
 CJK = re.compile(r"[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef\u2014\u2018\u2019\u201c\u201d]")
@@ -167,6 +170,10 @@ def convert_product_expr(expr: str) -> str:
         elif ch == "×":
             out.append(r"\times")
             i += 1
+        elif ch == "%":
+            # % is a comment char in LaTeX; always escape inside math
+            out.append(r"\%")
+            i += 1
         elif ch == " ":
             out.append(" ")
             i += 1
@@ -224,13 +231,17 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
                 else:
                     break
             run = text[i:j]
+            # trim dangling ·/× (no operand after it, e.g. "A · B" → "A")
+            while run and run[-1] in "·× ":
+                run = run[:-1]
+            run = run.strip()
             if "·" in run:
                 block = "$" + convert_product_expr(run) + "$"
                 mark("·", "unit product: letters assumed SI units (upright); verify variables are italic",
                      "units → \\mathrm{}, variables → italic")
                 out.append(block)
                 out_len += len(block)
-                i = j
+                i += len(run)
                 continue
 
         # --- punctuation (deterministic) ---
@@ -275,6 +286,21 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
             i += 1
             continue
 
+        # --- √ with argument (√5, √x, √(x+1)) → $\sqrt{...}$ ---
+        if ch == "√":
+            m = SQRT_ARG_RE.match(text, i)
+            if m:
+                block = r"$\sqrt{" + m.group(1) + "}$"
+                out.append(block)
+                out_len += len(block)
+                i = m.end()
+                continue
+            mark("√", "square root: argument expected (√5 → $\\sqrt{5}$)", r"$\sqrt{<arg>}$")
+            out.append(r"$\sqrt{}$")
+            out_len += len(r"$\sqrt{}$")
+            i += 1
+            continue
+
         # --- math operators outside math mode ---
         if ch in INLINE_OPS:
             # × in plain text → ASCII x (dimension descriptions, etc.)
@@ -283,15 +309,23 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
                 out_len += 1
                 i += 1
                 continue
-            # · between text/words (北京·上海) → ASCII . (text separator);
-            # product expressions were already absorbed by the lookahead above
+            # · between CJK chars (北京·上海) → keep as-is (CJK interpunct
+            # is legitimate Unicode punctuation, same family as ，。)
             if ch == "·":
                 prev_ch = text[i - 1] if i > 0 else ""
                 next_ch = text[i + 1] if i + 1 < n else ""
-                is_text_sep = (prev_ch.isalpha() and not prev_ch.isascii()) or \
-                              (next_ch.isalpha() and not next_ch.isascii())
-                out.append("." if is_text_sep else "·")
-                out_len += 1
+                is_cjk_sep = (prev_ch.isalpha() and not prev_ch.isascii()) or \
+                             (next_ch.isalpha() and not next_ch.isascii())
+                if is_cjk_sep:
+                    out.append("·")
+                    out_len += 1
+                    i += 1
+                    continue
+                # non-CJK stray ·: default to math, flag for LLM verification
+                mark("·", "interpunct: CJK separator vs math multiplication",
+                     "CJK context → keep ·; math → $\\cdot$")
+                out.append(r"$\cdot$")
+                out_len += len(r"$\cdot$")
                 i += 1
                 continue
             # ±/∓ followed by a number: absorb value into one math block ($\pm 2\%$)
@@ -351,7 +385,10 @@ def process(text: str) -> tuple[str, list[dict]]:
         if m.start() in reported:
             continue
         ch = m.group(0)
-        if CJK.match(ch) or ch == "\u00b0":  # °C is a legitimate unit form
+        # CJK, ° (degree), and · (U+00B7) are legitimate: CJK interpuncts
+        # (列夫·托尔斯泰) are kept by convert_plain; any non-CJK · would
+        # already have been converted to $\cdot$ there
+        if CJK.match(ch) or ch == "\u00b0" or ch == "\u00b7":
             continue
         ambiguous.append({
             "offset": m.start(),
