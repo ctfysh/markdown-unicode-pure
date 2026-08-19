@@ -82,6 +82,9 @@ MATH_OPS = {
 INLINE_OPS = {ch: f"${cmd}$" for ch, cmd in MATH_OPS.items()}
 INLINE_OPS["−"] = "-"  # minus sign in plain text → ASCII hyphen
 
+# Chars allowed inside an absorbed product expression (unit/values joined by ·)
+PRODUCT_CHARS = set("0123456789./%°") | set(SUPERSCRIPT_MAP) | set(SUBSCRIPT_MAP)
+
 # Unicode punctuation → ASCII
 PUNCT = {
     "–": "-", "—": "--", "…": "...",
@@ -127,6 +130,52 @@ def convert_math_mode(text: str) -> tuple[str, int]:
     return "".join(out)
 
 
+def convert_product_expr(expr: str) -> str:
+    """Convert a ·/×-joined unit/value expression into LaTeX math.
+
+    Unit letter runs (kg, m, s) are wrapped in \\mathrm{} (SI upright);
+    numbers and operators are kept. E.g. "kg·m/s" → \\mathrm{kg}\\cdot\\mathrm{m}/\\mathrm{s};
+    "5 · 10³" → 5 \\cdot 10^{3}.
+    """
+    out: list[str] = []
+    i, n = 0, len(expr)
+    while i < n:
+        ch = expr[i]
+        if ch in SUPERSCRIPT_MAP:
+            j = i + 1
+            while j < n and expr[j] in SUPERSCRIPT_MAP:
+                j += 1
+            sup = "".join(SUPERSCRIPT_MAP[c] for c in expr[i:j])
+            out.append("^{" + sup + "}")
+            i = j
+        elif ch in SUBSCRIPT_MAP:
+            j = i + 1
+            while j < n and expr[j] in SUBSCRIPT_MAP:
+                j += 1
+            sub = "".join(SUBSCRIPT_MAP[c] for c in expr[i:j])
+            out.append("_{" + sub + "}")
+            i = j
+        elif ch.isascii() and ch.isalpha():
+            j = i + 1
+            while j < n and expr[j].isascii() and expr[j].isalpha():
+                j += 1
+            out.append("\\mathrm{" + expr[i:j] + "}")
+            i = j
+        elif ch == "·":
+            out.append(r"\cdot")
+            i += 1
+        elif ch == "×":
+            out.append(r"\times")
+            i += 1
+        elif ch == " ":
+            out.append(" ")
+            i += 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out).strip()
+
+
 def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
     """Convert non-math text. Returns converted string; appends ambiguous hits
     with offsets relative to the final assembled output (base_offset + len(out))."""
@@ -149,6 +198,40 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
 
     while i < n:
         ch = text[i]
+
+        # --- ·-joined product expression (units/values) ---
+        # Detect at run start to avoid double-emitting the left operand:
+        # kg·m/s → $\mathrm{kg}\cdot\mathrm{m}/\mathrm{s}$; 5 · 10³ → $5 \cdot 10^{3}$
+        if ch.isascii() and (ch.isalnum() or ch in PRODUCT_CHARS):
+            j = i
+            while j < n:
+                c = text[j]
+                if c in "·×" or c in SUPERSCRIPT_MAP or c in SUBSCRIPT_MAP or \
+                   (c.isascii() and (c.isalnum() or c in PRODUCT_CHARS)):
+                    j += 1
+                elif c == " ":
+                    k = j
+                    while k < n and text[k] == " ":
+                        k += 1
+                    # continue absorbing after space only if next token is
+                    # a value (digit/super/sub) or ·/×, not a bare unit
+                    if k < n and (text[k] in "·×" or text[k] in SUPERSCRIPT_MAP or
+                                  text[k] in SUBSCRIPT_MAP or
+                                  (text[k].isascii() and text[k].isdigit())):
+                        j = k
+                        continue
+                    break
+                else:
+                    break
+            run = text[i:j]
+            if "·" in run:
+                block = "$" + convert_product_expr(run) + "$"
+                mark("·", "unit product: letters assumed SI units (upright); verify variables are italic",
+                     "units → \\mathrm{}, variables → italic")
+                out.append(block)
+                out_len += len(block)
+                i = j
+                continue
 
         # --- punctuation (deterministic) ---
         if ch in PUNCT:
@@ -201,18 +284,14 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
                 i += 1
                 continue
             # · between text/words (北京·上海) → ASCII . (text separator);
-            # between values/units (kg·m/s, 5·10³) → $\cdot$ (multiplication)
+            # product expressions were already absorbed by the lookahead above
             if ch == "·":
                 prev_ch = text[i - 1] if i > 0 else ""
                 next_ch = text[i + 1] if i + 1 < n else ""
                 is_text_sep = (prev_ch.isalpha() and not prev_ch.isascii()) or \
                               (next_ch.isalpha() and not next_ch.isascii())
-                if is_text_sep:
-                    out.append(".")
-                    out_len += 1
-                else:
-                    out.append(INLINE_OPS[ch])
-                    out_len += len(INLINE_OPS[ch])
+                out.append("." if is_text_sep else "·")
+                out_len += 1
                 i += 1
                 continue
             # ±/∓ followed by a number: absorb value into one math block ($\pm 2\%$)

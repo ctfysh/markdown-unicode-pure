@@ -13,8 +13,8 @@ description: 严禁所有 Unicode 特殊字符（上下标、数学符号、希�
 python3 unicode_purify.py <input> -o <output> --amb-out amb.json
 ```
 
-- 脚本处理：数学运算符、标点、单位上标（`m²`→`m^2^`）、化学下标（`H₂O`→`H~2~O`）、尺寸 `×`→`x`
-- 脚本无法判断（标注 `[AMBIGUOUS]` 或写入 amb.json）：希腊字母数学 vs 文本（`η`）、数学 vs 单位的上下标、`×` 尺寸 vs 乘法、`·` 分隔 vs 乘法
+- 脚本处理：数学运算符、标点、单位上标（`m²`→`m^2^`）、化学下标（`H₂O`→`H~2~O`）、尺寸 `×`→`x`、`·` 乘积表达式整体进 LaTeX（`kg·m/s`→`$\mathrm{kg}\cdot\mathrm{m}/\mathrm{s}$`）
+- 脚本无法判断（标注 `[AMBIGUOUS]` 或写入 amb.json）：希腊字母数学 vs 文本（`η`）、数学 vs 单位的上下标、`×` 尺寸 vs 乘法、`·` 分隔 vs 乘法、`·` 乘积中的字母是单位还是变量（默认按单位正体，若为变量改斜体）
 - 对 amb.json 每个条目，按下方决策树判断后替换（如 `效率 eta`→`效率 $\eta$`）
 - 无脚本环境（或单段文本）：直接按下方规则转换
 
@@ -73,7 +73,7 @@ python3 unicode_purify.py <input> -o <output> --amb-out amb.json
 |------|------|
 | `×` 在尺寸描述中（如 `2.0 m × 1.4 m`） | 转纯 ASCII `x`（`2.0 m x 1.4 m`），不进 LaTeX |
 | `×` 在数学公式中 | 用 `$\times$`（如 `$A = l \times w$`） |
-| `·` 两侧是单位/量值（`kg·m/s`、`5 · 10³`） | 乘法 → `$\cdot$`（`kg$\cdot$m/s`） |
+| `·` 两侧是单位/量值（`kg·m/s`、`5 · 10³`） | 整体进 LaTeX，单位正体 `\mathrm{}`（`$\mathrm{kg}\cdot\mathrm{m}/\mathrm{s}$`、`$5 \cdot 10^{3}$`） |
 | `·` 两侧是普通文字（`北京·上海`） | 分隔 → `.`（`北京.上海`） |
 | `±2%` 等符号+数值 | 整体进 LaTeX `$\pm 2\%$`（`%` 须转义 `\%`，勿拆散） |
 | `10^6^ kg` 等数量级+单位 | 用 `^ ^`，不进 LaTeX |
