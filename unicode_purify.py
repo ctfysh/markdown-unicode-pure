@@ -42,6 +42,10 @@ SUBSCRIPT_MAP = {
     "₀": "0", "₁": "1", "₂": "2", "₃": "3", "₄": "4", "₅": "5",
     "₆": "6", "₇": "7", "₈": "8", "₉": "9", "ₙ": "n",
     "₊": "+", "₋": "-", "₌": "=", "₍": "(", "₎": ")",
+    "ₐ": "a", "ₑ": "e", "ₒ": "o", "ₓ": "x", "ₖ": "k", "ₗ": "l",
+    "ₘ": "m", "ₚ": "p", "ₛ": "s", "ₜ": "t", "ᵢ": "i", "ⱼ": "j", "ᵣ": "r",
+    "ᵤ": "u", "ᵥ": "v", "ᵦ": "beta", "ᵧ": "gamma", "ᵨ": "rho",
+    "ᵩ": "phi", "ᵪ": "chi",
 }
 
 GREEK_LOWER = {
@@ -85,6 +89,9 @@ INLINE_OPS["−"] = "-"  # minus sign in plain text → ASCII hyphen
 # Chars allowed inside an absorbed product expression (unit/values joined by ·)
 PRODUCT_CHARS = set("0123456789./%°") | set(SUPERSCRIPT_MAP) | set(SUBSCRIPT_MAP)
 
+# ASCII chars that continue a math expression after ∑/∫/∏ (absorb into one block)
+MATH_EXPR_CHARS = set("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+-=()/,.")
+
 # Unicode punctuation → ASCII
 PUNCT = {
     "–": "-", "—": "--", "…": "...",
@@ -100,7 +107,7 @@ MATH_BLOCK = re.compile(r"\$[^$\n]+\$")   # $...$ spans (single-line)
 SUPER_RE = re.compile("[" + "".join(SUPERSCRIPT_MAP) + "]")
 SUB_RE = re.compile("[" + "".join(SUBSCRIPT_MAP) + "]")
 # ±/∓ immediately followed by a value (digits, optional %, optional unit)
-VALUE_AFTER_SIGN = re.compile(r"[±∓]\s*(\d[\d.,]*\s*%?)")
+VALUE_AFTER_SIGN = re.compile(r"[±∓]\s*(\d[\d.,]*%?)")
 # √ + immediate argument: ASCII digits/letters/dot, or a parenthesized
 # expression; ASCII-only so superscripts (√x²) stay out of the radical
 SQRT_ARG_RE = re.compile(r"√\s*([0-9A-Za-z_.]+|\([^)]*\))")
@@ -117,19 +124,39 @@ LEFTOVER = re.compile(r"[^\x00-\x7f]")
 def convert_math_mode(text: str) -> tuple[str, int]:
     """Convert a $...$ math span: Unicode ops → \\cmd, super/sub → ^/_."""
     out = []
+    prev_was_cmd = False
     for ch in text:
         if ch in SUPERSCRIPT_MAP:
             out.append("^" + SUPERSCRIPT_MAP[ch])
+            prev_was_cmd = False
         elif ch in SUBSCRIPT_MAP:
             out.append("_" + SUBSCRIPT_MAP[ch])
+            prev_was_cmd = False
         elif ch in MATH_OPS:
-            out.append(MATH_OPS[ch])
+            cmd = MATH_OPS[ch]
+            # \sumx would be an unknown command; separate cmd from following letter
+            if cmd.startswith("\\") and prev_was_cmd:
+                out.append(" ")
+            out.append(cmd)
+            prev_was_cmd = True
         elif ch in GREEK_LOWER:
+            if prev_was_cmd:
+                out.append(" ")
             out.append("\\" + GREEK_LOWER[ch])
+            prev_was_cmd = True
         elif ch in GREEK_UPPER:
+            if prev_was_cmd:
+                out.append(" ")
             out.append("\\" + GREEK_UPPER[ch])
+            prev_was_cmd = True
+        elif ch.isascii() and ch.isalnum():
+            if prev_was_cmd:
+                out.append(" ")
+            out.append(ch)
+            prev_was_cmd = False
         else:
             out.append(ch)
+            prev_was_cmd = False
     return "".join(out)
 
 
@@ -290,10 +317,19 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
         if ch == "√":
             m = SQRT_ARG_RE.match(text, i)
             if m:
-                block = r"$\sqrt{" + m.group(1) + "}$"
+                arg = m.group(1)
+                j = m.end()
+                # absorb trailing superscript into the radical (√x² → $\sqrt{x^2}$)
+                sup = ""
+                while j < n and text[j] in SUPERSCRIPT_MAP:
+                    sup += SUPERSCRIPT_MAP[text[j]]
+                    j += 1
+                if sup:
+                    arg += "^{" + sup + "}"
+                block = r"$\sqrt{" + arg + "}$"
                 out.append(block)
                 out_len += len(block)
-                i = m.end()
+                i = j
                 continue
             mark("√", "square root: argument expected (√5 → $\\sqrt{5}$)", r"$\sqrt{<arg>}$")
             out.append(r"$\sqrt{}$")
@@ -303,6 +339,33 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
 
         # --- math operators outside math mode ---
         if ch in INLINE_OPS:
+            # ∑/∫/∏ absorb the following expression into one math block
+            # (∑x² → $\sum x^2$, ∫0¹ x² dx → $\int 0^1 x^2 dx$) to avoid
+            # mixing LaTeX operators with Markdown superscripts
+            if ch in "∑∫∏":
+                j = i + 1
+                while j < n:
+                    c = text[j]
+                    if c in SUPERSCRIPT_MAP or c in SUBSCRIPT_MAP or \
+                       (c.isascii() and c in MATH_EXPR_CHARS):
+                        j += 1
+                    elif c == " ":
+                        k = j
+                        while k < n and text[k] == " ":
+                            k += 1
+                        if k < n and (text[k] in SUPERSCRIPT_MAP or text[k] in SUBSCRIPT_MAP or
+                                      (text[k].isascii() and text[k] in MATH_EXPR_CHARS)):
+                            j = k
+                            continue
+                        break
+                    else:
+                        break
+                expr = text[i:j]
+                block = "$" + convert_math_mode(expr) + "$"
+                out.append(block)
+                out_len += len(block)
+                i = j
+                continue
             # × in plain text → ASCII x (dimension descriptions, etc.)
             if ch == "×":
                 out.append("x")
