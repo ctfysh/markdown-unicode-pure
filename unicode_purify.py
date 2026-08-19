@@ -171,15 +171,12 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
             continue
 
         # --- Greek letters: plain text → English name ---
+        # math vs text 归属是语义判断（效率 η → $\eta$；beta 测试 → beta），
+        # 脚本一律标记进 amb.json，由 LLM 按决策树二次判断，不静默决定。
         if ch in GREEK_LOWER or ch in GREEK_UPPER:
             name = GREEK_LOWER[ch] if ch in GREEK_LOWER else GREEK_UPPER[ch]
-            prev_ch = text[i - 1] if i > 0 else ""
-            next_nonspace = next((c for c in text[i + 1:] if not c.isspace()), "")
-            if (prev_ch in "=<>+-*/(" or next_nonspace in "=<>+-*/)"
-                    or (prev_ch.isascii() and prev_ch.isalpha())
-                    or (not prev_ch.isascii() and prev_ch.isalpha())):  # CJK context → math var
-                mark(ch, "Greek letter possibly in math context",
-                     f"${name}$ (math) or {name} (plain text)")
+            mark(ch, "Greek letter: math vs plain text",
+                 f"${name}$ (math) or {name} (plain text)")
             out.append(name)
             out_len += len(name)
             i += 1
