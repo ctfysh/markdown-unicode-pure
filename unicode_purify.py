@@ -92,6 +92,9 @@ PRODUCT_CHARS = set("0123456789./%°") | set(SUPERSCRIPT_MAP) | set(SUBSCRIPT_MA
 # ASCII chars that continue a math expression after ∑/∫/∏ (absorb into one block)
 MATH_EXPR_CHARS = set("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+-=()/,.")
 
+# Full continuation set: ASCII math chars + Unicode operators (∑x² - ∑y² → one block)
+MATH_CONTINUE = set(MATH_EXPR_CHARS) | set(MATH_OPS)
+
 # Unicode punctuation → ASCII
 PUNCT = {
     "–": "-", "—": "--", "…": "...",
@@ -121,17 +124,30 @@ LEFTOVER = re.compile(r"[^\x00-\x7f]")
 # --------------------------------------------------------------------------
 
 
-def convert_math_mode(text: str) -> tuple[str, int]:
+def convert_math_mode(text: str) -> str:
     """Convert a $...$ math span: Unicode ops → \\cmd, super/sub → ^/_."""
     out = []
     prev_was_cmd = False
-    for ch in text:
-        if ch in SUPERSCRIPT_MAP:
-            out.append("^" + SUPERSCRIPT_MAP[ch])
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in SUPERSCRIPT_MAP or ch in SUBSCRIPT_MAP:
+            # merge consecutive sup/sub chars: ᵢ₌₁ⁿ → _{i=1}^n;
+            # single char keeps no braces: x² → x^2, aⱼ → a_j
+            j = i
+            if ch in SUBSCRIPT_MAP:
+                while j < n and text[j] in SUBSCRIPT_MAP:
+                    j += 1
+                chain = "".join(SUBSCRIPT_MAP[c] for c in text[i:j])
+                out.append(("_" + chain) if len(chain) == 1 else "_{" + chain + "}")
+            else:
+                while j < n and text[j] in SUPERSCRIPT_MAP:
+                    j += 1
+                chain = "".join(SUPERSCRIPT_MAP[c] for c in text[i:j])
+                out.append(("^" + chain) if len(chain) == 1 else "^{" + chain + "}")
             prev_was_cmd = False
-        elif ch in SUBSCRIPT_MAP:
-            out.append("_" + SUBSCRIPT_MAP[ch])
-            prev_was_cmd = False
+            i = j
         elif ch in MATH_OPS:
             cmd = MATH_OPS[ch]
             # \sumx would be an unknown command; separate cmd from following letter
@@ -139,24 +155,29 @@ def convert_math_mode(text: str) -> tuple[str, int]:
                 out.append(" ")
             out.append(cmd)
             prev_was_cmd = True
+            i += 1
         elif ch in GREEK_LOWER:
             if prev_was_cmd:
                 out.append(" ")
             out.append("\\" + GREEK_LOWER[ch])
             prev_was_cmd = True
+            i += 1
         elif ch in GREEK_UPPER:
             if prev_was_cmd:
                 out.append(" ")
             out.append("\\" + GREEK_UPPER[ch])
             prev_was_cmd = True
+            i += 1
         elif ch.isascii() and ch.isalnum():
             if prev_was_cmd:
                 out.append(" ")
             out.append(ch)
             prev_was_cmd = False
+            i += 1
         else:
             out.append(ch)
             prev_was_cmd = False
+            i += 1
     return "".join(out)
 
 
@@ -176,14 +197,14 @@ def convert_product_expr(expr: str) -> str:
             while j < n and expr[j] in SUPERSCRIPT_MAP:
                 j += 1
             sup = "".join(SUPERSCRIPT_MAP[c] for c in expr[i:j])
-            out.append("^{" + sup + "}")
+            out.append("^" + sup if len(sup) == 1 else "^{" + sup + "}")
             i = j
         elif ch in SUBSCRIPT_MAP:
             j = i + 1
             while j < n and expr[j] in SUBSCRIPT_MAP:
                 j += 1
             sub = "".join(SUBSCRIPT_MAP[c] for c in expr[i:j])
-            out.append("_{" + sub + "}")
+            out.append("_" + sub if len(sub) == 1 else "_{" + sub + "}")
             i = j
         elif ch.isascii() and ch.isalpha():
             j = i + 1
@@ -230,6 +251,14 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
             "context": ctx,
         })
 
+    def emit_math(block: str) -> None:
+        nonlocal out_len
+        if out and out[-1].endswith("$"):
+            out.append(" ")
+            out_len += 1
+        out.append(block)
+        out_len += len(block)
+
     while i < n:
         ch = text[i]
 
@@ -266,8 +295,7 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
                 block = "$" + convert_product_expr(run) + "$"
                 mark("·", "unit product: letters assumed SI units (upright); verify variables are italic",
                      "units → \\mathrm{}, variables → italic")
-                out.append(block)
-                out_len += len(block)
+                emit_math(block)
                 i += len(run)
                 continue
 
@@ -278,25 +306,46 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
             i += 1
             continue
 
-        # --- superscript: always Markdown ^N^ (any context) ---
-        if ch in SUPERSCRIPT_MAP:
-            j = i + 1
-            while j < n and text[j] in SUPERSCRIPT_MAP:
-                j += 1
-            digits = "".join(SUPERSCRIPT_MAP[c] for c in text[i:j])
-            out.append("^" + digits + "^")
-            out_len += len(digits) + 2
-            i = j
-            continue
-
-        # --- subscript: always Markdown ~N~ (any context) ---
-        if ch in SUBSCRIPT_MAP:
-            j = i + 1
+        # --- superscript/subscript: formula (letter/= subscript) → LaTeX, else Markdown ---
+        if ch in SUPERSCRIPT_MAP or ch in SUBSCRIPT_MAP:
+            sub_chain, sup_chain = [], []
+            j = i
             while j < n and text[j] in SUBSCRIPT_MAP:
+                sub_chain.append(SUBSCRIPT_MAP[text[j]])
                 j += 1
-            digits = "".join(SUBSCRIPT_MAP[c] for c in text[i:j])
-            out.append("~" + digits + "~")
-            out_len += len(digits) + 2
+            while j < n and text[j] in SUPERSCRIPT_MAP:
+                sup_chain.append(SUPERSCRIPT_MAP[text[j]])
+                j += 1
+            letters = [v for v in sub_chain + sup_chain if v.isalpha()]
+            has_eq = "=" in sub_chain or "=" in sup_chain
+            if letters or has_eq:
+                # confirmed formula (aⱼ → $a_j$, xᵢ₌₁ⁿ → $x_{i=1}^n$);
+                # look back for the ASCII base variable already emitted
+                k = i
+                while k > 0 and text[k - 1].isascii() and text[k - 1].isalnum():
+                    k -= 1
+                base = text[k:i]
+                if base and out and "".join(out[-len(base):]) == base:
+                    del out[-len(base):]
+                    out_len -= len(base)
+                block = "$" + base
+                if sub_chain:
+                    s = "".join(sub_chain)
+                    block += ("_" + s) if len(s) == 1 else "_{" + s + "}"
+                if sup_chain:
+                    s = "".join(sup_chain)
+                    block += ("^" + s) if len(s) == 1 else "^{" + s + "}"
+                block += "$"
+                emit_math(block)
+                i = j
+                continue
+            # uncertain/plain (H₂O, m², s⁻¹) → Markdown
+            if sub_chain:
+                out.append("~" + "".join(sub_chain) + "~")
+                out_len += len(sub_chain) + 2
+            if sup_chain:
+                out.append("^" + "".join(sup_chain) + "^")
+                out_len += len(sup_chain) + 2
             i = j
             continue
 
@@ -327,13 +376,11 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
                 if sup:
                     arg += "^{" + sup + "}"
                 block = r"$\sqrt{" + arg + "}$"
-                out.append(block)
-                out_len += len(block)
+                emit_math(block)
                 i = j
                 continue
             mark("√", "square root: argument expected (√5 → $\\sqrt{5}$)", r"$\sqrt{<arg>}$")
-            out.append(r"$\sqrt{}$")
-            out_len += len(r"$\sqrt{}$")
+            emit_math(r"$\sqrt{}$")
             i += 1
             continue
 
@@ -343,27 +390,82 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
             # (∑x² → $\sum x^2$, ∫0¹ x² dx → $\int 0^1 x^2 dx$) to avoid
             # mixing LaTeX operators with Markdown superscripts
             if ch in "∑∫∏":
+                cmd = MATH_OPS[ch]
+                parts: list[str] = []
+                cur: list[str] = []
+                first = True
                 j = i + 1
+
+                def flush_block() -> None:
+                    nonlocal first
+                    expr = "".join(cur).strip()
+                    cur.clear()
+                    if not expr:
+                        return
+                    # trailing binary op absorbed but not followed by an operand
+                    # (∫0¹ x² dx + ∑yᵢ) belongs outside the math block
+                    tail = ""
+                    while expr and expr[-1] in "+-=":
+                        tail = expr[-1] + tail
+                        expr = expr[:-1].strip()
+                    if expr:
+                        math = convert_math_mode(expr)
+                        sep = " " if first and not math.startswith(("_", "^")) else ""
+                        parts.append("$" + (cmd if first else "") + sep + math + "$")
+                        first = False
+                    if tail:
+                        parts.append(tail)
+
                 while j < n:
                     c = text[j]
-                    if c in SUPERSCRIPT_MAP or c in SUBSCRIPT_MAP or \
-                       (c.isascii() and c in MATH_EXPR_CHARS):
+                    if c in SUPERSCRIPT_MAP or c in SUBSCRIPT_MAP or c in MATH_CONTINUE:
+                        cur.append(c)
                         j += 1
                     elif c == " ":
                         k = j
                         while k < n and text[k] == " ":
                             k += 1
                         if k < n and (text[k] in SUPERSCRIPT_MAP or text[k] in SUBSCRIPT_MAP or
-                                      (text[k].isascii() and text[k] in MATH_EXPR_CHARS)):
+                                      text[k] in MATH_CONTINUE or
+                                      text[k] in "和与及或到至"):
+                            cur.append(" ")
                             j = k
                             continue
                         break
+                    elif c in "和与及或" or c in "到至":
+                        if c in "到至":
+                            # summation bounds (∑ i=1 到 n → $\sum_{i=1}^{n}$)
+                            lower = "".join(cur).strip()
+                            k = j + 1
+                            while k < n and text[k] == " ":
+                                k += 1
+                            upper = ""
+                            while k < n and (text[k] in SUPERSCRIPT_MAP or
+                                             text[k] in SUBSCRIPT_MAP or
+                                             (text[k].isascii() and text[k] in MATH_EXPR_CHARS)):
+                                upper += text[k]
+                                k += 1
+                            upper = upper.strip()
+                            if lower and upper:
+                                parts.append("$" + cmd + "_{" +
+                                             convert_math_mode(lower) + "}^{" +
+                                             convert_math_mode(upper) + "}$")
+                                first = False
+                                cur = []
+                                j = k
+                                continue
+                            break
+                        # conjunction (和/与/及/或): close current block, emit
+                        # conjunction as text, absorb next expr into its own block
+                        flush_block()
+                        parts.append(c)
+                        j += 1
+                        continue
                     else:
                         break
-                expr = text[i:j]
-                block = "$" + convert_math_mode(expr) + "$"
-                out.append(block)
-                out_len += len(block)
+                flush_block()
+                block = "".join(parts)
+                emit_math(block)
                 i = j
                 continue
             # × in plain text → ASCII x (dimension descriptions, etc.)
@@ -387,8 +489,7 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
                 # non-CJK stray ·: default to math, flag for LLM verification
                 mark("·", "interpunct: CJK separator vs math multiplication",
                      "CJK context → keep ·; math → $\\cdot$")
-                out.append(r"$\cdot$")
-                out_len += len(r"$\cdot$")
+                emit_math(r"$\cdot$")
                 i += 1
                 continue
             # ±/∓ followed by a number: absorb value into one math block ($\pm 2\%$)
@@ -396,12 +497,10 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
                 m = VALUE_AFTER_SIGN.match(text, i)
                 num = m.group(1).replace("%", r"\%")
                 block = "$" + MATH_OPS[ch] + " " + num + "$"
-                out.append(block)
-                out_len += len(block)
+                emit_math(block)
                 i = m.end()
                 continue
-            out.append(INLINE_OPS[ch])
-            out_len += len(INLINE_OPS[ch])
+            emit_math(INLINE_OPS[ch])
             i += 1
             continue
 
