@@ -16,20 +16,34 @@ AI 默认输出倾向使用 Unicode 特殊字符（`m²`、`H₂O`、`η`、`±`
 
 ## 转换规则速览
 
+转换优先级：**Markdown > LaTeX > 绝不用 Unicode（任何形式）**。
+
 | 场景 | 规则 | 示例 |
 |------|------|------|
-| 数学变量/公式 | `$...$` + `_`/`^` | `x²` → `$x^2$`，`α` → `$\alpha$` |
-| 物理单位 | Markdown `^ ^` | `m²` → `m^2^`，`s⁻¹` → `s^-1^` |
-| 化学式 | Markdown `~ ~` | `H₂O` → `H~2~O` |
+| 上下标（任何语境） | Markdown `^ ^` / `~ ~` 优先 | `m²` → `m^2^`，`x²` → `x^2^`，`H₂O` → `H~2~O`，`¹⁴C` → `^14^C` |
+| 数学运算符 | LaTeX `$...$` | `±` → `$\pm$`，`≤` → `$\le$`，`∑` → `$\sum$` |
+| 符号+数值 | 整体进 LaTeX，`%` 转义 `\%` | `±2%` → `$\pm 2\%$` |
+| 尺寸 `×` | 纯 ASCII `x` | `2.0 m × 1.4 m` → `2.0 m x 1.4 m` |
+| 数学公式中的 `×` | `$\times$` | `$A = l \times w$` |
+| 希腊字母（数学） | LaTeX `$\alpha$` | `α > β` → `$\alpha > \beta$` |
+| 希腊字母（文本） | 英文名 | `η 为 95%` → `eta 为 95%` |
 | 序数/编号/年份 | 保持纯文本 | `1st`、`Figure 1`、`2024` |
-| 数学运算符 | LaTeX | `±` → `$\pm$`，`≤` → `$\le$` |
 | 特殊标点 | ASCII | `–` → `-`，`…` → `...` |
+
+## 批量处理脚本
+
+`unicode_purify.py` 做确定性替换（上下标、运算符、希腊字母、标点、`±` 数值），无法判断的语义歧义写入 amb.json 供二次处理：
+
+```bash
+python3 unicode_purify.py <input> -o <output> --amb-out amb.json
+```
 
 ## 文件结构
 
 | 文件 | 用途 |
 |------|------|
 | `SKILL.md` | 主规范（决策树 + 转换规则表 + 失败模式 + 反例清单） |
+| `unicode_purify.py` | 批量确定性转换脚本（上下标/运算符/希腊字母/标点 + amb.json 歧义报告） |
 | `test-prompts.json` | 3 个测试 prompt（用于实测表现评估） |
 | `results.tsv` | 达尔文优化日志（9 列，含 eval_mode） |
 
@@ -46,3 +60,4 @@ AI 默认输出倾向使用 Unicode 特殊字符（`m²`、`H₂O`、`η`、`±`
 | baseline | 初始版本（130 行） | 76.7 分 |
 | Round 1 | 添加失败模式 fallback 表（dim3） | 2-0 better → keep |
 | Round 2 | 重构压缩：决策树前置 + 合并表格 + 新增反例清单（130→92 行） | 2-0 better → keep |
+| Round 3 | Markdown 优先原则 + 新增 unicode_purify.py 批量脚本（dim6 资源整合） | 主 session 自评（待记录） |
