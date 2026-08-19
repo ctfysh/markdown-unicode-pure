@@ -59,6 +59,15 @@ GREEK_UPPER = {
     "Φ": "Phi", "Χ": "Chi", "Ψ": "Psi", "Ω": "Omega",
 }
 
+# Unicode → LaTeX command inside math mode ($...$) for Greek letters
+GREEK_LATEX = {
+    "α": r"\alpha", "β": r"\beta", "γ": r"\gamma", "δ": r"\delta", "ε": r"\epsilon",
+    "ζ": r"\zeta", "η": r"\eta", "θ": r"\theta", "ι": r"\iota", "κ": r"\kappa",
+    "λ": r"\lambda", "μ": r"\mu", "ν": r"\nu", "ξ": r"\xi", "ο": r"\omicron",
+    "π": r"\pi", "ρ": r"\rho", "σ": r"\sigma", "τ": r"\tau", "υ": r"\upsilon",
+    "φ": r"\phi", "χ": r"\chi", "ψ": r"\psi", "ω": r"\omega",
+}
+
 # Unicode → LaTeX command inside math mode ($...$)
 MATH_OPS = {
     "×": r"\times", "÷": r"\div", "±": r"\pm", "∓": r"\mp", "·": r"\cdot",
@@ -175,8 +184,9 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
         # 脚本一律标记进 amb.json，由 LLM 按决策树二次判断，不静默决定。
         if ch in GREEK_LOWER or ch in GREEK_UPPER:
             name = GREEK_LOWER[ch] if ch in GREEK_LOWER else GREEK_UPPER[ch]
-            mark(ch, "Greek letter: math vs plain text",
-                 f"${name}$ (math) or {name} (plain text)")
+            latex = GREEK_LATEX.get(ch)
+            suggestion = f"${latex}$ (math) or {name} (plain text)" if latex else f"{name} (plain text)"
+            mark(ch, "Greek letter: math vs plain text", suggestion)
             out.append(name)
             out_len += len(name)
             i += 1
