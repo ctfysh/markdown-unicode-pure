@@ -70,6 +70,9 @@ GREEK_LATEX = {
     "λ": r"\lambda", "μ": r"\mu", "ν": r"\nu", "ξ": r"\xi", "ο": r"\omicron",
     "π": r"\pi", "ρ": r"\rho", "σ": r"\sigma", "τ": r"\tau", "υ": r"\upsilon",
     "φ": r"\phi", "χ": r"\chi", "ψ": r"\psi", "ω": r"\omega",
+    "Γ": r"\Gamma", "Δ": r"\Delta", "Θ": r"\Theta", "Λ": r"\Lambda",
+    "Ξ": r"\Xi", "Π": r"\Pi", "Σ": r"\Sigma", "Υ": r"\Upsilon",
+    "Φ": r"\Phi", "Ψ": r"\Psi", "Ω": r"\Omega",
 }
 
 # Unicode → LaTeX command inside math mode ($...$)
@@ -231,6 +234,70 @@ def convert_product_expr(expr: str) -> str:
     return "".join(out).strip()
 
 
+def _ident_to_math(ident: str) -> str:
+    """ΔLOO-IC → \mathrm{LOO\text{-}IC}; δT → T; δ¹³C → ^{13}\mathrm{C}"""
+    parts = []
+    i = 0
+    n = len(ident)
+    after_sup = False
+    while i < n:
+        c = ident[i]
+        if c in SUPERSCRIPT_MAP:
+            chain = []
+            while i < n and ident[i] in SUPERSCRIPT_MAP:
+                chain.append(SUPERSCRIPT_MAP[ident[i]])
+                i += 1
+            parts.append("^{" + "".join(chain) + "}")
+            after_sup = True
+        elif c in SUBSCRIPT_MAP:
+            chain = []
+            while i < n and ident[i] in SUBSCRIPT_MAP:
+                chain.append(SUBSCRIPT_MAP[ident[i]])
+                i += 1
+            parts.append("_{" + "".join(chain) + "}")
+            after_sup = True
+        else:
+            run = []
+            while i < n and (ident[i].isascii() and (ident[i].isalnum() or ident[i] == "-")):
+                run.append(ident[i])
+                i += 1
+            r = "".join(run)
+            if len(r) == 1 and r.isalpha() and not after_sup:
+                parts.append(r)  # single-letter variable stays italic
+            else:
+                # element symbol after isotope superscript (δ¹³C) or acronym
+                # run (LOO-IC) → upright \mathrm{}; hyphen is a text hyphen
+                parts.append(r"{\mathrm{" + r.replace("-", r"\text{-}") + "}}")
+            after_sup = False
+    return "".join(parts)
+
+
+def _ident_to_md(ident: str) -> str:
+    """Convert Unicode superscripts/subscripts inside an absorbed identifier
+    to Markdown (δ¹³C absorbed → delta^13^C), keeping ASCII as-is."""
+    parts = []
+    i = 0
+    n = len(ident)
+    while i < n:
+        c = ident[i]
+        if c in SUPERSCRIPT_MAP:
+            chain = []
+            while i < n and ident[i] in SUPERSCRIPT_MAP:
+                chain.append(SUPERSCRIPT_MAP[ident[i]])
+                i += 1
+            parts.append("^" + "".join(chain) + "^")
+        elif c in SUBSCRIPT_MAP:
+            chain = []
+            while i < n and ident[i] in SUBSCRIPT_MAP:
+                chain.append(SUBSCRIPT_MAP[ident[i]])
+                i += 1
+            parts.append("~" + "".join(chain) + "~")
+        else:
+            parts.append(c)
+            i += 1
+    return "".join(parts)
+
+
 def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
     """Convert non-math text. Returns converted string; appends ambiguous hits
     with offsets relative to the final assembled output (base_offset + len(out))."""
@@ -239,13 +306,17 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
     i = 0
     n = len(text)
 
-    def mark(ch: str, reason: str, suggestion: str | None) -> None:
+    def mark(ch: str, reason: str, suggestion: str | None,
+             scope: str | None = None) -> None:
+        # scope: whole unit the character belongs to (e.g. ΔLOO-IC) — the
+        # suggestion then covers the whole scope, so a reviewer never
+        # replaces just the character and splits the unit (mixing).
         start = max(0, i - 25)
         ctx = text[start:i + 26].replace("\n", " ")
         ambiguous.append({
             "offset": base_offset + out_len,
-            "char": ch,
-            "code_point": f"U+{ord(ch):04X}",
+            "char": scope or ch,
+            "code_point": f"U+{ord((scope or ch)[0]):04X}",
             "reason": reason,
             "suggestion": suggestion,
             "context": ctx,
@@ -355,6 +426,38 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
         if ch in GREEK_LOWER or ch in GREEK_UPPER:
             name = GREEK_LOWER[ch] if ch in GREEK_LOWER else GREEK_UPPER[ch]
             latex = GREEK_LATEX.get(ch)
+            # Scope lookahead: Δ/δ prefixing an ASCII identifier (ΔLOO-IC,
+            # ΔT, δ¹³C) — the Greek letter's scope covers the whole
+            # identifier, not the letter alone. Suggest the whole form so a
+            # reviewer never produces a lone $\Delta$ glued to bare text.
+            if ch in "Δδ" and i + 1 < n:
+                j = i + 1
+                while j < n:
+                    c = text[j]
+                    if c in SUPERSCRIPT_MAP or c in SUBSCRIPT_MAP:
+                        j += 1
+                    elif c.isascii() and (c.isalnum() or c == "-"):
+                        j += 1
+                    else:
+                        break
+                if j > i + 1:
+                    ident = text[i + 1:j]
+                    scope = ch + ident
+                    math_suffix = _ident_to_math(ident)
+                    md_suffix = _ident_to_md(ident)
+                    text_suffix = name + " " + md_suffix
+                    # \Delta + bare letter needs a space (\Delta T), otherwise
+                    # \DeltaT parses as an undefined command in LaTeX
+                    sep = " " if math_suffix[:1].isalpha() else ""
+                    suggestion = (f"${latex}{sep}{math_suffix}$ (math) or "
+                                  f"{text_suffix} (plain text)")
+                    mark(ch, "Greek prefix + identifier: one scope "
+                             "(ΔLOO-IC → $\\Delta\\mathrm{LOO\\text{-}IC}$)",
+                         suggestion, scope=scope)
+                    out.append(name + md_suffix)
+                    out_len += len(name) + len(md_suffix)
+                    i = j
+                    continue
             suggestion = f"${latex}$ (math) or {name} (plain text)" if latex else f"{name} (plain text)"
             mark(ch, "Greek letter: math vs plain text", suggestion)
             out.append(name)
@@ -565,6 +668,46 @@ def process(text: str) -> tuple[str, list[dict]]:
 
 
 # --------------------------------------------------------------------------
+# Mixing (混杂) audit
+# --------------------------------------------------------------------------
+
+# LaTeX + Markdown markers mixed inside one unit — the anti-patterns the
+# decision tree forbids. Blocks are located with MATH_BLOCK (same $...$
+# semantics as the converter) so boundaries never cross spaces or CJK.
+SPLIT_FORMULA_RE = re.compile(r"\$[^$\n]+\$\s*[-+]\s*\$[^$\n]+\$")
+
+
+def check_mixing(text: str) -> list[dict]:
+    """Scan text for LaTeX/Markdown mixing patterns (混杂). Returns
+    {offset, pattern, match, context} hits sorted by offset."""
+    hits = []
+    for m in MATH_BLOCK.finditer(text):
+        offset = m.start()
+        block = m.group(0)
+        content = block[1:-1]
+        after = text[m.end():m.end() + 1]
+        ctx = text[max(0, offset - 25):m.end() + 25].replace("\n", " ")
+        if CJK.search(content):
+            hits.append({"offset": offset, "pattern": "CJK inside math block",
+                         "match": block, "context": ctx})
+        if after == "$":
+            hits.append({"offset": offset, "pattern": "adjacent math blocks without space",
+                         "match": block, "context": ctx})
+        elif after.isascii() and after.isalnum():
+            hits.append({"offset": offset, "pattern": "math block glued to bare text",
+                         "match": block, "context": ctx})
+        elif after and after in "^~":
+            hits.append({"offset": offset, "pattern": "math block followed by Markdown super/subscript",
+                         "match": block, "context": ctx})
+        if SPLIT_FORMULA_RE.match(text, offset):
+            hits.append({"offset": offset, "pattern": "operator between math blocks (split formula)",
+                         "match": SPLIT_FORMULA_RE.match(text, offset).group(0),
+                         "context": ctx})
+    hits.sort(key=lambda h: h["offset"])
+    return hits
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
@@ -581,6 +724,9 @@ def main() -> int:
                     help="print machine-readable JSON summary instead of text")
     ap.add_argument("--no-ambiguous-marker", action="store_true",
                     help="do not embed [AMBIGUOUS ...] markers in the text output")
+    ap.add_argument("--check-mixing", action="store_true",
+                    help="scan output for LaTeX/Markdown mixing patterns; "
+                         "exit 2 if any found")
     args = ap.parse_args()
 
     if args.input == "-":
@@ -612,8 +758,14 @@ def main() -> int:
             "source": src_name,
             "ambiguous_count": len(ambiguous),
             "ambiguous": ambiguous,
+            "mixing_count": 0,
+            "mixing": [],
             "output": converted,
         }
+        if args.check_mixing:
+            mixing = check_mixing(converted)
+            stats["mixing_count"] = len(mixing)
+            stats["mixing"] = mixing
         print(json.dumps(stats, ensure_ascii=False, indent=2))
     elif args.output:
         Path(args.output).write_text(converted, encoding="utf-8")
@@ -621,6 +773,16 @@ def main() -> int:
               f"{len(ambiguous)} ambiguous)", file=sys.stderr)
     else:
         print(converted, end="")
+
+    if args.check_mixing and not args.json:
+        mixing = check_mixing(converted)
+        if mixing:
+            print(f"{len(mixing)} mixing violation(s):", file=sys.stderr)
+            for h in mixing:
+                print(f"  @{h['offset']}: {h['pattern']}  "
+                      f"match={h['match']!r}  ...{h['context']}...",
+                      file=sys.stderr)
+            return 2
 
     if args.amb_out:
         Path(args.amb_out).write_text(

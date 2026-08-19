@@ -33,6 +33,8 @@ python3 unicode_purify.py <input> -o <output> --amb-out amb.json
 
 **如何判断"确认是公式"**：上下标含**字母**（`aⱼ`、`xᵢ`）或含 `=`（`xᵢ₌₁ⁿ`）→ 数学变量下标，确认公式 → LaTeX（`$a_j$`、`$x_{i=1}^{n}$`）；只有数字（`H₂O`、`m²`、`s⁻¹`）→ 单位/化学式 → Markdown。`∑`/`∫`/`∏` 出现 → 确认公式。
 
+**作用范围界定（scope）**：一个特殊字符 + 它的语义操作数 = **一个整体**，转换必须整体进行，不能只换字符。`Δ`/`δ` 后紧跟 ASCII 标识符（`ΔLOO-IC`、`ΔT`、`δ¹³C`）→ 前瞻吸收整体转换（`DeltaLOO-IC` → amb 建议 `$\Delta\mathrm{LOO\text{-}IC}$`、`DeltaT` → `$\Delta T$`、`delta^13^C` → `$\delta^{13}{\mathrm{C}}$`）；后跟空格/中文/句号 → 孤立希腊字母（`Δ G` 的 `Δ`）。同理 `±2%` 是 `$\pm 2\%$` 整体，`$\pm$2%` 是拆散反例。
+
 优先级总原则：**确认文字 → Markdown；确认公式 → LaTeX；不确定 → Markdown 兜底；绝不混杂**（同一表达式内禁止混用 `$...$` 与 `^ ^`/`~ ~`；中文绝不放进 LaTeX）。
 
 ## 混杂自检清单（转换完成后逐项核对）
@@ -49,6 +51,8 @@ python3 unicode_purify.py <input> -o <output> --amb-out amb.json
 - [ ] 上标格式是否统一？→ 单字符 `^2`/`_j`，多字符 `^{10}`/`_{i=1}`（如 `m^2^`、`x^{10}`、`$x_{i=1}^{n}$`）
 
 > AI 生成的文本比 Python 转换更容易引入混杂——LLM 输出也可能把 LaTeX 运算符与 Markdown 上下标拼在一起。无论来源，转换后必须过此清单。
+
+**自动复核**：`python3 unicode_purify.py 输入.md --check-mixing` 扫描输出的 5 类混杂反模式（中文进 LaTeX、相邻块无空格、公式块粘连裸文本、公式块后跟 Markdown 上下标、运算符拆散完整公式），命中打印报告并 **exit code 2**（门禁失败）；`--json` 模式把 hits 并入 `mixing`/`mixing_count` 字段。
 
 ## 转换规则表
 
@@ -103,6 +107,8 @@ python3 unicode_purify.py <input> -o <output> --amb-out amb.json
 | `∑`/`∫`/`∏` 后接表达式 | **整体吸收**进一个 LaTeX 块（`∑x²`→`$\sum x^2$`、`∫0¹ x² dx`→`$\int 0^1 x^2 dx$`）；**完整公式 = 一个环境**（`∑x² - ∑y²`→`$\sum x^2 - \sum y^2$`）；遇中文连词 `和/与/及/或` 拆块（`∑x²和y²`→`$\sum x^2$和$y^2$`）、`到/至` 转上下限（`∑ i=1 到 n`→`$\sum_{i=1}^{n}$`）；其他中文（`，`、`的`）立即中断，中文绝不放进 LaTeX |
 | `aⱼ`、`xᵢ₌₁ⁿ` 等字母下标 | 确认公式 → LaTeX `$a_j$`、`$x_{i=1}^{n}$`（字母/`=` 下标是数学变量标志；数字下标是单位/化学式标志） |
 | `10^6^ kg` 等数量级+单位 | 用 `^ ^`，不进 LaTeX |
+| `ΔLOO-IC`、`ΔT`、`δ¹³C`（Δ/δ 后紧跟标识符/上下标） | **作用范围前瞻吸收**：整个标识符（含 `-`）整体转换，绝不拆散（`ΔLOO-IC`→`DeltaLOO-IC`，amb 建议 `$\Delta\mathrm{LOO\text{-}IC}$`；`ΔT`→`DeltaT`，`$\Delta T$`；`δ¹³C`→`delta^13^C`，`$\delta^{13}{\mathrm{C}}$`）。**禁止 `$\Delta$LOO-IC`**（符号+客体拆散 = 混杂） |
+| `Δ G`（Δ/δ 后跟空格/中文/句号） | 孤立希腊字母：文本语境 → `Delta`/`delta` 英文名，数学语境 → `$\Delta$`/`$\delta$`（无操作数可吸收） |
 
 ## 失败模式
 
@@ -128,6 +134,8 @@ python3 unicode_purify.py <input> -o <output> --amb-out amb.json
 | ∑x² - ∑y² | $\sum x^2 - \sum y^2$（一个完整公式 = 一个 LaTeX 环境） |
 | ∑x²和y² | $\sum x^2$和$y^2$（`和` 是中文连词，两侧各自成块） |
 | ∑ i=1 到 n | $\sum_{i=1}^{n}$（`到` 引入上下限） |
+| ΔLOO-IC、ΔT、δ¹³C | DeltaLOO-IC（amb 建议 `$\Delta\mathrm{LOO\text{-}IC}$`）、DeltaT（`$\Delta T$`）、delta^13^C（`$\delta^{13}{\mathrm{C}}$`） |
+| $\Delta$LOO-IC、$\pm$2% | $\Delta\mathrm{LOO\text{-}IC}$、$\pm 2\%$（符号+操作数拆散 = 混杂） |
 
 ## 反例清单（不要做什么）
 
@@ -142,5 +150,6 @@ python3 unicode_purify.py <input> -o <output> --amb-out amb.json
 | 不要把序数写成上标 `1^st^` | 保持纯文本 `1st` |
 | 不要把字母下标转成 Markdown `a~j~` | 确认公式 → LaTeX `$a_j$` |
 | 不要混用 `$\sum$x^2^` | 整体进 LaTeX `$\sum x^2$` |
+| 不要拆散符号+操作数 `$\Delta$LOO-IC`、`$\pm$2%` | 整体 `$\Delta\mathrm{LOO\text{-}IC}$`、`$\pm 2\%$`（作用范围：特殊字符+语义操作数=一个整体） |
 | 不要拆散完整公式 `$\sum x^2$ - $\sum y^2$` | 一个环境 `$\sum x^2 - \sum y^2$` |
 | 不要把中文放进 LaTeX `$\sum x^2和y^2$` | 中文连词留在文本 `$\sum x^2$和$y^2$` |

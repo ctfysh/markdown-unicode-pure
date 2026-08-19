@@ -13,5 +13,15 @@
     "id": 3,
     "prompt": "以下文本包含哪些 Unicode 违规字符？列出每处并给出修正：面积 2.0 m × 1.4 m，体积 2.8 m³，∑x² + y²，α > β，温度 20–30°C。",
     "expected": "m³→m^3^，∑x² + y²→$\\sum x^2 + y^2$（整体吸收），α→alpha（标记 amb 由决策树判 math/text），β→beta（标记 amb），×→x（ASCII），–→-（ASCII 连字符）"
+  },
+  {
+    "id": 4,
+    "prompt": "把以下统计学术语中的 Unicode 字符替换为正确的 Markdown/LaTeX 写法：ΔLOO-IC 表示差异，ΔT 是温度差，δ¹³C 是同位素值。",
+    "expected": "DeltaLOO-IC 表示差异（amb 建议 $\\Delta\\mathrm{LOO\\text{-}IC}$），DeltaT 是温度差（amb 建议 $\\Delta T$），delta^13^C 是同位素值（amb 建议 $\\delta^{13}{\\mathrm{C}}$）"
+  },
+  {
+    "id": 5,
+    "prompt": "检查并修正这段 AI 生成的文本中的混杂问题（LaTeX 与 Markdown 混用）：结果为 $\\sum$x^2^，误差 $\\pm$2%，相关性 $a_i$$b_j$。",
+    "expected": "结果为 $\\sum x^2$（符号与上标整体进一个环境），误差 $\\pm 2\\%$（±与数值整体），相关性 $a_i$ $b_j$（相邻公式块加空格）"
   }
 ]
