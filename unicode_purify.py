@@ -1,24 +1,37 @@
 #!/usr/bin/env python3
 """
-unicode_purify.py — deterministic Unicode → ASCII/Markdown/LaTeX conversion
-for the `markdown-unicode-pure` skill.
+unicode_purify.py — pure execution engine for the `markdown-unicode-pure` skill.
 
-Two-pass design:
-  Pass A (deterministic): converts characters whose mapping is context-free
-      (math operators, Greek letters, punctuation, superscripts after units,
-      subscripts inside chemical formulas).
-  Pass B (ambiguity report): anything the script cannot decide reliably
-      (context-dependent superscripts/subscripts, stray symbols) is left in
-      place and reported as [AMBIGUOUS ...] entries, intended for a second
-      LLM pass guided by the skill's decision tree.
+All judgment belongs to the AI; this script only executes. The AI reads the
+input text, finds every problem (Unicode special chars, LaTeX/Markdown mixing,
+misused forms such as units/chemical formulas in math), classifies each with a
+`kind`, and writes an annotation file. This script validates those annotations
+mechanically, renders each replacement from lookup tables, and applies it.
+It never scans, detects, or classifies.
+
+Loop (until all problems are resolved):
+  1. AI: read <input>; classify every problem; write annotations.json
+     [{"offset": 10, "scope": "m²", "kind": "markdown_super"}, ...]
+  2. Python:
+       python3 unicode_purify.py <input> --annotations ann.json -o out.md
+     validate (offset+scope must match the input text, kind must be known,
+     scopes must not overlap) -> render -> apply. Invalid annotations abort
+     with an error; nothing is guessed.
+  3. AI: read <output>; if problems remain, write new/changed annotations and
+     return to step 2. Python can list remaining non-ASCII characters as
+     factual evidence (--leftover) to help the AI check.
+
+Kinds (AI classifies; Python renders mechanically):
+  unicode kinds:   markdown_super markdown_sub math_super_sub
+                   greek_math greek_text greek_prefix_math greek_prefix_md
+                   math_op op_value math_expr sum_limits
+                   dimension_x math_x product interpunct sqrt punct keep
+  structural:      merge_math space_blocks chem_to_md unit_to_md
+                   ordinal_plain letter_sub_math
 
 Usage:
-  python3 unicode_purify.py <input> [-o output.md] [--amb-out amb.json]
-      [--in-place] [--json] [--no-ambiguous-marker]
-
-Examples:
-  python3 unicode_purify.py draft.md -o clean.md --amb-out amb.json
-  python3 unicode_purify.py draft.md --in-place
+  python3 unicode_purify.py <input> --annotations ann.json -o out.md [--json]
+  python3 unicode_purify.py <input> --leftover    # factual non-ASCII listing
 """
 
 from __future__ import annotations
@@ -30,7 +43,7 @@ import sys
 from pathlib import Path
 
 # --------------------------------------------------------------------------
-# Character maps
+# Character maps (lookup tables; the mechanical "how to change" knowledge)
 # --------------------------------------------------------------------------
 
 SUPERSCRIPT_MAP = {
@@ -89,210 +102,319 @@ MATH_OPS = {
 INLINE_OPS = {ch: f"${cmd}$" for ch, cmd in MATH_OPS.items()}
 INLINE_OPS["−"] = "-"  # minus sign in plain text → ASCII hyphen
 
-# Chars allowed inside an absorbed product expression (unit/values joined by ·)
-PRODUCT_CHARS = set("0123456789./%°") | set(SUPERSCRIPT_MAP) | set(SUBSCRIPT_MAP)
-
-# ASCII chars that continue a math expression after ∑/∫/∏ (absorb into one block)
-MATH_EXPR_CHARS = set("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+-=()/,.")
-
-# Full continuation set: ASCII math chars + Unicode operators (∑x² - ∑y² → one block)
-MATH_CONTINUE = set(MATH_EXPR_CHARS) | set(MATH_OPS)
-
 # Unicode punctuation → ASCII
 PUNCT = {
     "–": "-", "—": "--", "…": "...",
     "‘": "'", "’": "'", "“": '"', "”": '"',
 }
 
-# --------------------------------------------------------------------------
-# Patterns
-# --------------------------------------------------------------------------
-
-MATH_BLOCK = re.compile(r"\$[^$\n]+\$")   # $...$ spans (single-line)
-
-SUPER_RE = re.compile("[" + "".join(SUPERSCRIPT_MAP) + "]")
-SUB_RE = re.compile("[" + "".join(SUBSCRIPT_MAP) + "]")
-# ±/∓ immediately followed by a value (digits, optional %, optional unit)
-VALUE_AFTER_SIGN = re.compile(r"[±∓]\s*(\d[\d.,]*%?)")
-# √ + immediate argument: ASCII digits/letters/dot, or a parenthesized
-# expression; ASCII-only so superscripts (√x²) stay out of the radical
-SQRT_ARG_RE = re.compile(r"√\s*([0-9A-Za-z_.]+|\([^)]*\))")
+# Characters that are legitimately non-ASCII and stay untouched
+VALID_UNICODE = set("\u00b0\u00b7")  # degree, interpunct
 
 # --------------------------------------------------------------------------
-# Document-level consistency (上下文一致性): Pass 0 pre-scan
+# Mechanical renderers: kind + scope → replacement string
+# The AI supplies (offset, scope, kind); these functions never decide what a
+# scope means, only how to write it in the target syntax.
 # --------------------------------------------------------------------------
 
-# An author-written Markdown token with super/subscripts: m^2^, H~2~O, 10^6^
-MD_TOKEN_RE = re.compile(r"(?:[A-Za-z0-9]+|\^[^^\n]+\^|~[^^~\n]+~)+")
 
-
-def _normalize_token(s: str) -> str:
-    """Canonical form of an entity regardless of how it was written, so
-    different spellings of the same variable/unit map to one key:
-      f_exp, f_{exp}, f~exp~, fₑₓₚ        → f[exp]
-      m^2^, m², m^{2}                     → m[^2]
-      δ¹³C, delta^13^C, \\delta^{13}\\mathrm{C} → delta[^13]C
-    Single-pass scanner (regex chains would re-wrap their own [^...]
-    markers). Used only for matching; never emitted into output."""
-    s = s.strip()
-    for g, name in {**GREEK_LOWER, **GREEK_UPPER}.items():
-        s = s.replace(g, name)
-    s = s.lower()
-    out: list[str] = []
-    i, n = 0, len(s)
+def _render_markdown_super(scope: str) -> str:
+    """m² → m^2^, ¹⁴C → ^14^C, s⁻¹ → s^-1^ (digit superscripts → ^N^)."""
+    out, i, n = [], 0, len(scope)
     while i < n:
-        c = s[i]
+        c = scope[i]
         if c in SUPERSCRIPT_MAP:
             j = i + 1
-            while j < n and s[j] in SUPERSCRIPT_MAP:
+            while j < n and scope[j] in SUPERSCRIPT_MAP:
                 j += 1
-            chain = "".join(SUPERSCRIPT_MAP[x] for x in s[i:j])
-            out.append("[^" + chain + "]")
+            out.append("^" + "".join(SUPERSCRIPT_MAP[x] for x in scope[i:j]) + "^")
             i = j
-        elif c in SUBSCRIPT_MAP:
-            j = i + 1
-            while j < n and s[j] in SUBSCRIPT_MAP:
-                j += 1
-            chain = "".join(SUBSCRIPT_MAP[x] for x in s[i:j])
-            out.append("[" + chain + "]")
-            i = j
-        elif c == "\\":
-            m = re.match(r"\\(?:mathrm|text)\{([^}]*)\}", s[i:])
-            if m:
-                out.append(m.group(1))
-                i += len(m.group(0))
-            else:
-                m = re.match(r"\\[a-zA-Z]+", s[i:])
-                if m:
-                    out.append(m.group(0)[1:])
-                    i += len(m.group(0))
-                else:
-                    i += 1
-        elif c == "^":
-            m = re.match(r"\^\{([^}]*)\}", s[i:])
-            if m:
-                out.append("[^" + m.group(1) + "]")
-                i += len(m.group(0))
-            else:
-                m = re.match(r"\^([^^~]+)\^", s[i:])
-                if m:
-                    out.append("[^" + m.group(1) + "]")
-                    i += len(m.group(0))
-                else:
-                    m = re.match(r"\^[a-zA-Z0-9]", s[i:])
-                    if m:
-                        out.append("[^" + m.group(0)[1:] + "]")
-                        i += 2
-                    else:
-                        i += 1
-        elif c == "_":
-            m = re.match(r"_\{([^}]*)\}", s[i:])
-            if m:
-                out.append("[" + m.group(1) + "]")
-                i += len(m.group(0))
-            else:
-                m = re.match(r"_([a-zA-Z0-9]+)", s[i:])
-                if m:
-                    out.append("[" + m.group(1) + "]")
-                    i += len(m.group(0))
-                else:
-                    i += 1
-        elif c == "~":
-            m = re.match(r"~([^^~]+)~", s[i:])
-            if m:
-                out.append("[" + m.group(1) + "]")
-                i += len(m.group(0))
-            else:
-                i += 1
         else:
             out.append(c)
             i += 1
     return "".join(out)
 
 
-def _math_block_tokens(content: str) -> list[str]:
-    """Tokens inside a $...$ math span, e.g. 'f_{exp} + g^2' →
-    ['f[exp]', 'g[^2]']."""
-    pieces = re.split(r"[\s+\-*/=()<>,.;:|]+", content.strip("$"))
-    out = []
-    for p in pieces:
-        if p and any(c.isalnum() for c in p):
-            t = _normalize_token(p)
-            if t and re.search(r"[a-z0-9]", t):
-                out.append(t)
+def _render_markdown_sub(scope: str) -> str:
+    """H₂O → H~2~O (digit subscripts → ~N~)."""
+    out, i, n = [], 0, len(scope)
+    while i < n:
+        c = scope[i]
+        if c in SUBSCRIPT_MAP:
+            j = i + 1
+            while j < n and scope[j] in SUBSCRIPT_MAP:
+                j += 1
+            out.append("~" + "".join(SUBSCRIPT_MAP[x] for x in scope[i:j]) + "~")
+            i = j
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _render_math_super_sub(scope: str) -> str:
+    """aⱼ → $a_j$, xᵢ₌₁ⁿ → $x_{i=1}^{n}$ (letter/= super/sub → LaTeX)."""
+    return "$" + convert_math_mode(scope) + "$"
+
+
+def _render_greek_math(scope: str) -> str:
+    """η → $\\eta$ (math context)."""
+    return "$" + GREEK_LATEX[scope[0]] + "$"
+
+
+def _render_greek_text(scope: str) -> str:
+    """η → eta (plain text context)."""
+    ch = scope[0]
+    return GREEK_LOWER.get(ch) or GREEK_UPPER.get(ch)
+
+
+def _render_greek_prefix_math(scope: str) -> str:
+    """ΔLOO-IC → $\\Delta\\mathrm{LOO\\text{-}IC}$; δ¹³C → $\\delta^{13}\\mathrm{C}$."""
+    ch, ident = scope[0], scope[1:]
+    suffix = _ident_to_math(ident)
+    sep = " " if suffix[:1].isalpha() else ""  # \Delta T, never \DeltaT
+    return f"${GREEK_LATEX[ch]}{sep}{suffix}$"
+
+
+def _render_greek_prefix_md(scope: str) -> str:
+    """ΔLOO-IC → DeltaLOO-IC; δ¹³C → delta^13^C (plain text form)."""
+    ch, ident = scope[0], scope[1:]
+    name = GREEK_LOWER.get(ch) or GREEK_UPPER.get(ch)
+    return name + _ident_to_md(ident)
+
+
+def _render_math_op(scope: str) -> str:
+    """± → $\\pm$ (standalone operator)."""
+    return INLINE_OPS[scope[0]]
+
+
+def _render_op_value(scope: str) -> str:
+    """±2% → $\\pm 2\\%$ (operator + value absorbed)."""
+    ch, rest = scope[0], scope[1:]
+    num = rest.replace("%", r"\%")
+    return f"${MATH_OPS[ch]} {num}$"
+
+
+def _render_math_expr(scope: str) -> str:
+    """∑x² - ∑y² → $\\sum x^2 - \\sum y^2$ (whole expression, one block)."""
+    return "$" + convert_math_mode(scope) + "$"
+
+
+def _render_sum_limits(scope: str) -> str:
+    """∑ i=1 到 n → $\\sum_{i=1}^{n}$ (到/至 introduce bounds)."""
+    m = re.match(r"([∑∏∫])\s*(.*?)\s*(?:到|至)\s*(.*)", scope)
+    if not m:
+        return scope
+    cmd = MATH_OPS[m.group(1)]
+    lower = convert_math_mode(m.group(2))
+    upper = convert_math_mode(m.group(3))
+    return f"${cmd}_{{{lower}}}^{{{upper}}}$"
+
+
+def _render_dimension_x(scope: str) -> str:
+    """× in dimensions → x (2.0 m × 1.4 m → 2.0 m x 1.4 m)."""
+    return "x"
+
+
+def _render_math_x(scope: str) -> str:
+    """× in math → $\\times$."""
+    return r"$\times$"
+
+
+def _render_product(scope: str) -> str:
+    """kg·m/s → $\\mathrm{kg}\\cdot\\mathrm{m}/\\mathrm{s}$ (whole product)."""
+    return "$" + convert_product_expr(scope) + "$"
+
+
+def _render_interpunct(scope: str) -> str:
+    """· between CJK (北京·上海) → keep as-is."""
+    return scope
+
+
+def _render_sqrt(scope: str) -> str:
+    """√5 → $\\sqrt{5}$ (whole argument absorbed)."""
+    return r"$\sqrt{" + scope[1:] + "}$"
+
+
+def _render_punct(scope: str) -> str:
+    """– → -, … → ... (Unicode punctuation → ASCII)."""
+    return PUNCT[scope[0]]
+
+
+def _render_keep(scope: str) -> str:
+    """1st, 2024, Figure 1 → unchanged (already correct)."""
+    return scope
+
+
+# Commands the merge renderer can safely split apart when glued to a letter or
+# digit (\sumx → \sum x, \pm2 → \pm 2). Unknown commands are left untouched.
+KNOWN_COMMANDS = (
+    sorted({v for v in MATH_OPS.values() if v.startswith("\\")},
+           key=len, reverse=True)
+    + [r"\\" + n for n in GREEK_LOWER.values()]
+    + [r"\\" + n for n in GREEK_UPPER.values()]
+)
+
+
+def _render_merge_math(scope: str) -> str:
+    """Merge a split/mixed unit into one math block:
+    $\\sum$x^2^ → $\\sum x^2$; $\\pm$2% → $\\pm 2\\%$."""
+    inner = scope.replace("$", "")
+    # Markdown super/sub markers → LaTeX (single char keeps no braces)
+    inner = re.sub(r"\^([^^~]+)\^",
+                   lambda m: "^" + m.group(1) if len(m.group(1)) == 1
+                   else "^{" + m.group(1) + "}", inner)
+    inner = re.sub(r"~([^^~]+)~",
+                   lambda m: "_" + m.group(1) if len(m.group(1)) == 1
+                   else "_{" + m.group(1) + "}", inner)
+    inner = convert_math_mode(inner)
+    inner = inner.replace("%", r"\%")  # % is a comment char in LaTeX
+    for cmd in KNOWN_COMMANDS:
+        # split a known command glued to a letter/digit; never split \pm into
+        # \p m (a plain `\\[a-zA-Z]+(?=[a-zA-Z])` regex backtracks into this)
+        inner = re.sub(re.escape(cmd) + r"(?=[0-9a-zA-Z])",
+                       lambda _: cmd + " ", inner)
+    return "$" + inner + "$"
+
+
+def _render_space_blocks(scope: str) -> str:
+    """$a_i$$b_j$ → $a_i$ $b_j$ (adjacent math blocks get a space)."""
+    return re.sub(r"(\$[^$\n]+\$)(\$)", r"\1 \2", scope)
+
+
+def _render_chem_to_md(scope: str) -> str:
+    """$H_2O$ → H~2~O (chemical formula wrongly in LaTeX → Markdown)."""
+    inner = scope.strip("$")
+    inner = re.sub(r"_(\d+)", r"~\1~", inner)
+    inner = re.sub(r"\^(\d+)", r"^\1^", inner)
+    return inner
+
+
+def _render_unit_to_md(scope: str) -> str:
+    """$10 m^2$ → 10 m^2^ (unit wrongly in LaTeX → Markdown)."""
+    inner = scope.strip("$")
+    inner = re.sub(r"\^(\d+)", r"^\1^", inner)
+    inner = re.sub(r"_(\d+)", r"~\1~", inner)
+    return inner
+
+
+def _render_ordinal_plain(scope: str) -> str:
+    """1^st^ → 1st (ordinal superscript → plain text)."""
+    return re.sub(r"\^([^^~]+)\^", r"\1", scope)
+
+
+def _render_letter_sub_math(scope: str) -> str:
+    """x~i~ → $x_i$ (letter subscript wrongly as Markdown → LaTeX)."""
+    inner = re.sub(r"~([^~]+)~",
+                   lambda m: "_" + m.group(1) if len(m.group(1)) == 1
+                   else "_{" + m.group(1) + "}", scope)
+    return "$" + convert_math_mode(inner) + "$"
+
+
+RENDERERS = {
+    "markdown_super": _render_markdown_super,
+    "markdown_sub": _render_markdown_sub,
+    "math_super_sub": _render_math_super_sub,
+    "greek_math": _render_greek_math,
+    "greek_text": _render_greek_text,
+    "greek_prefix_math": _render_greek_prefix_math,
+    "greek_prefix_md": _render_greek_prefix_md,
+    "math_op": _render_math_op,
+    "op_value": _render_op_value,
+    "math_expr": _render_math_expr,
+    "sum_limits": _render_sum_limits,
+    "dimension_x": _render_dimension_x,
+    "math_x": _render_math_x,
+    "product": _render_product,
+    "interpunct": _render_interpunct,
+    "sqrt": _render_sqrt,
+    "punct": _render_punct,
+    "keep": _render_keep,
+    "merge_math": _render_merge_math,
+    "space_blocks": _render_space_blocks,
+    "chem_to_md": _render_chem_to_md,
+    "unit_to_md": _render_unit_to_md,
+    "ordinal_plain": _render_ordinal_plain,
+    "letter_sub_math": _render_letter_sub_math,
+}
+
+
+# --------------------------------------------------------------------------
+# Execution: validate → render → apply
+# --------------------------------------------------------------------------
+
+
+def validate_annotations(text: str, annotations: list[dict]) -> list[str]:
+    """Check every annotation against the input text. Returns error strings
+    (empty = valid). A mis-scoped annotation aborts; the script never guesses."""
+    errors: list[str] = []
+    seen: list[tuple[int, int]] = []
+    for idx, ann in enumerate(annotations):
+        if "offset" not in ann or "scope" not in ann or "kind" not in ann:
+            errors.append(f"#{idx}: missing offset/scope/kind")
+            continue
+        off, scope, kind = ann["offset"], ann["scope"], ann["kind"]
+        if not isinstance(off, int) or off < 0 or off >= len(text):
+            errors.append(f"#{idx}: offset {off} out of range (len={len(text)})")
+            continue
+        if text[off:off + len(scope)] != scope:
+            errors.append(f"#{idx}: scope {scope!r} does not match text at "
+                          f"offset {off} ({text[off:off + 12]!r}...)")
+            continue
+        if kind not in RENDERERS:
+            errors.append(f"#{idx}: unknown kind {kind!r}")
+            continue
+        for so, se in seen:
+            if not (off + len(scope) <= so or se <= off):
+                errors.append(f"#{idx}: scope overlaps annotation at {so}")
+        seen.append((off, off + len(scope)))
+    return errors
+
+
+def apply_annotations(text: str, annotations: list[dict]) -> str:
+    """Render and apply validated annotations. Offsets refer to the ORIGINAL
+    text, so replacements are applied right-to-left to keep them stable."""
+    plan = []
+    for ann in annotations:
+        scope, kind = ann["scope"], ann["kind"]
+        plan.append((ann["offset"], ann["offset"] + len(scope),
+                     RENDERERS[kind](scope)))
+    plan.sort(key=lambda p: p[0], reverse=True)  # apply from the end
+    out = text
+    for start, end, repl in plan:
+        out = out[:start] + repl + out[end:]
     return out
 
 
-class DocContext:
-    """Pass 0 evidence: which normalized tokens appear in confirmed math
-    ($...$) vs confirmed Markdown (author-written ^ ^ / ~ ~) contexts.
-    A later ambiguous token that matches one of these gets a consistency
-    hint instead of a neutral suggestion."""
+def _is_cjk(ch: str) -> bool:
+    """True for CJK ideographs/punctuation/fullwidth forms — never conversion
+    targets of this script (no RENDERERS kind handles them)."""
+    o = ord(ch)
+    return (0x3000 <= o <= 0x303F or 0x3400 <= o <= 0x4DBF or
+            0x4E00 <= o <= 0x9FFF or 0xF900 <= o <= 0xFAFF or
+            0xFF00 <= o <= 0xFFEF)
 
-    def __init__(self, text: str):
-        self.math: dict[str, list[int]] = {}
-        self.md: dict[str, list[int]] = {}
-        para_start = 0
-        self.paras: list[tuple[int, int]] = []
-        for m in re.finditer(r"\n\s*\n", text):
-            self.paras.append((para_start, m.start()))
-            para_start = m.end()
-        self.paras.append((para_start, len(text)))
 
-        math_spans = [m.span() for m in MATH_BLOCK.finditer(text)]
-        for s, e in math_spans:
-            for t in _math_block_tokens(text[s:e]):
-                self.math.setdefault(t, []).append(s)
-        for m in MD_TOKEN_RE.finditer(text):
-            if m.group(0).startswith(("^", "~")):
-                continue
-            # skip tokens inside $...$ math spans: \eta would normalize to
-            # "eta" and falsely claim a Markdown confirmation for it
-            if any(s <= m.start() < e for s, e in math_spans):
-                continue
-            # skip ASCII runs that are the tail of a Unicode entity
-            # (δ¹³C → the trailing C is part of the isotope, not a token)
-            prev = text[m.start() - 1] if m.start() > 0 else ""
-            if prev in SUPERSCRIPT_MAP or prev in SUBSCRIPT_MAP or \
-               prev in GREEK_LOWER or prev in GREEK_UPPER:
-                continue
-            t = _normalize_token(m.group(0))
-            if t and re.search(r"[a-z0-9]", t):
-                self.md.setdefault(t, []).append(m.start())
+def leftover_nonascii(text: str) -> list[dict]:
+    """Factual listing of non-ASCII characters that could need conversion
+    (excluding CJK and valid symbols) — evidence for the AI's final check,
+    not judgment."""
+    hits = []
+    for m in re.finditer(r"[^\x00-\x7f]", text):
+        ch = m.group(0)
+        if ch in VALID_UNICODE or _is_cjk(ch):
+            continue
+        hits.append({
+            "offset": m.start(),
+            "char": ch,
+            "code_point": f"U+{ord(ch):04X}",
+            "context": text[max(0, m.start() - 25):m.start() + 25].replace("\n", " "),
+        })
+    return hits
 
-    def _proximity(self, a: int, b: int) -> str:
-        for s, e in self.paras:
-            if s <= a < e and s <= b < e:
-                return "same paragraph"
-        return "document-level"
-
-    def evidence(self, token: str, offset: int) -> dict | None:
-        """Nearest confirmed occurrence for token, or None if unknown.
-        Returns {kind: 'math'|'md', offset, distance, proximity} or
-        {conflict: True, math_offsets, md_offsets} when both contexts exist."""
-        m_offs = self.math.get(token) or []
-        d_offs = self.md.get(token) or []
-        if not m_offs and not d_offs:
-            return None
-        if m_offs and d_offs:
-            return {"conflict": True,
-                    "math_offsets": m_offs[:3], "md_offsets": d_offs[:3]}
-        if m_offs:
-            off = min(m_offs, key=lambda o: abs(o - offset))
-            return {"kind": "math", "offset": off,
-                    "distance": abs(off - offset),
-                    "proximity": self._proximity(off, offset)}
-        off = min(d_offs, key=lambda o: abs(o - offset))
-        return {"kind": "md", "offset": off,
-                "distance": abs(off - offset),
-                "proximity": self._proximity(off, offset)}
-
-# Anything non-ASCII that we did not resolve (excluding CJK and CJK punct)
-CJK = re.compile(r"[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef\u2014\u2018\u2019\u201c\u201d]")
-LEFTOVER = re.compile(r"[^\x00-\x7f]")
 
 # --------------------------------------------------------------------------
-# Pass A: deterministic conversion
+# Math-mode renderers (shared by several kinds)
 # --------------------------------------------------------------------------
 
 
@@ -306,18 +428,18 @@ def convert_math_mode(text: str) -> str:
         ch = text[i]
         if ch in SUPERSCRIPT_MAP or ch in SUBSCRIPT_MAP:
             # merge consecutive sup/sub chars: ᵢ₌₁ⁿ → _{i=1}^n;
-            # single char keeps no braces: x² → x^2, aⱼ → a_j
+            # single char keeps no braces: x² → x^2, aⱼ → a_j, xₙ² → x_n^2
+            is_sub = ch in SUBSCRIPT_MAP
+            table = SUBSCRIPT_MAP if is_sub else SUPERSCRIPT_MAP
             j = i
-            if ch in SUBSCRIPT_MAP:
-                while j < n and text[j] in SUBSCRIPT_MAP:
-                    j += 1
-                chain = "".join(SUBSCRIPT_MAP[c] for c in text[i:j])
-                out.append(("_" + chain) if len(chain) == 1 else "_{" + chain + "}")
+            while j < n and text[j] in table:
+                j += 1
+            chain = "".join(table[c] for c in text[i:j])
+            mark = "_" if is_sub else "^"
+            if len(chain) == 1:
+                out.append(mark + chain)
             else:
-                while j < n and text[j] in SUPERSCRIPT_MAP:
-                    j += 1
-                chain = "".join(SUPERSCRIPT_MAP[c] for c in text[i:j])
-                out.append(("^" + chain) if len(chain) == 1 else "^{" + chain + "}")
+                out.append(mark + "{" + chain + "}")
             prev_was_cmd = False
             i = j
         elif ch in MATH_OPS:
@@ -404,7 +526,7 @@ def convert_product_expr(expr: str) -> str:
 
 
 def _ident_to_math(ident: str) -> str:
-    """ΔLOO-IC → \mathrm{LOO\text{-}IC}; δT → T; δ¹³C → ^{13}\mathrm{C}"""
+    """ΔLOO-IC → \\mathrm{LOO\\text{-}IC}; δT → T; δ¹³C → ^{13}\\mathrm{C}"""
     parts = []
     i = 0
     n = len(ident)
@@ -434,9 +556,10 @@ def _ident_to_math(ident: str) -> str:
             if len(r) == 1 and r.isalpha() and not after_sup:
                 parts.append(r)  # single-letter variable stays italic
             else:
-                # element symbol after isotope superscript (δ¹³C) or acronym
-                # run (LOO-IC) → upright \mathrm{}; hyphen is a text hyphen
-                parts.append(r"{\mathrm{" + r.replace("-", r"\text{-}") + "}}")
+                # element symbol after isotope superscript (δ¹³C) is grouped
+                # {\mathrm{C}}; a standalone acronym run (LOO-IC) is not
+                inner = r"\mathrm{" + r.replace("-", r"\text{-}") + "}"
+                parts.append("{" + inner + "}" if after_sup else inner)
             after_sup = False
     return "".join(parts)
 
@@ -467,442 +590,6 @@ def _ident_to_md(ident: str) -> str:
     return "".join(parts)
 
 
-def convert_plain(text: str, ambiguous: list[dict], base_offset: int,
-                  ctx: DocContext | None = None) -> str:
-    """Convert non-math text. Returns converted string; appends ambiguous hits
-    with offsets relative to the final assembled output (base_offset + len(out))."""
-    out: list[str] = []
-    out_len = 0
-    i = 0
-    n = len(text)
-
-    def mark(ch: str, reason: str, suggestion: str | None,
-             scope: str | None = None, token: str | None = None) -> None:
-        # scope: whole unit the character belongs to (e.g. ΔLOO-IC) — the
-        # suggestion then covers the whole scope, so a reviewer never
-        # replaces just the character and splits the unit (mixing).
-        # token: normalized canonical form for document-level consistency
-        # lookup (f_exp / f_{exp} / f~exp~ → f[exp]).
-        start = max(0, i - 25)
-        ctx_text = text[start:i + 26].replace("\n", " ")
-        entry = {
-            "offset": base_offset + out_len,
-            "char": scope or ch,
-            "code_point": f"U+{ord((scope or ch)[0]):04X}",
-            "reason": reason,
-            "suggestion": suggestion,
-            "context": ctx_text,
-        }
-        if token is not None and ctx is not None:
-            ev = ctx.evidence(token, i)
-            if ev:
-                if ev.get("conflict"):
-                    entry["consistency"] = ("document shows this token in BOTH math "
-                                            f"{ev['math_offsets']} and markdown "
-                                            f"{ev['md_offsets']}")
-                    if suggestion:
-                        suggestion += " [CONFLICT]"
-                else:
-                    kind = "LaTeX/math" if ev["kind"] == "math" else "Markdown/text"
-                    entry["consistency"] = (f"seen as {kind} at offset {ev['offset']} "
-                                            f"({ev['proximity']})")
-                    if suggestion:
-                        suggestion += f" [context: {kind}]"
-                entry["suggestion"] = suggestion
-        ambiguous.append(entry)
-
-    def emit_math(block: str) -> None:
-        nonlocal out_len
-        if out and out[-1].endswith("$"):
-            out.append(" ")
-            out_len += 1
-        out.append(block)
-        out_len += len(block)
-
-    while i < n:
-        ch = text[i]
-
-        # --- ·-joined product expression (units/values) ---
-        # Detect at run start to avoid double-emitting the left operand:
-        # kg·m/s → $\mathrm{kg}\cdot\mathrm{m}/\mathrm{s}$; 5 · 10³ → $5 \cdot 10^{3}$
-        if ch.isascii() and (ch.isalnum() or ch in PRODUCT_CHARS):
-            j = i
-            while j < n:
-                c = text[j]
-                if c in "·×" or c in SUPERSCRIPT_MAP or c in SUBSCRIPT_MAP or \
-                   (c.isascii() and (c.isalnum() or c in PRODUCT_CHARS)):
-                    j += 1
-                elif c == " ":
-                    k = j
-                    while k < n and text[k] == " ":
-                        k += 1
-                    # continue absorbing after space only if next token is
-                    # a value (digit/super/sub) or ·/×, not a bare unit
-                    if k < n and (text[k] in "·×" or text[k] in SUPERSCRIPT_MAP or
-                                  text[k] in SUBSCRIPT_MAP or
-                                  (text[k].isascii() and text[k].isdigit())):
-                        j = k
-                        continue
-                    break
-                else:
-                    break
-            run = text[i:j]
-            # trim dangling ·/× (no operand after it, e.g. "A · B" → "A")
-            while run and run[-1] in "·× ":
-                run = run[:-1]
-            run = run.strip()
-            if "·" in run:
-                block = "$" + convert_product_expr(run) + "$"
-                mark("·", "unit product: letters assumed SI units (upright); verify variables are italic",
-                     "units → \\mathrm{}, variables → italic",
-                     token=_normalize_token(run))
-                emit_math(block)
-                i += len(run)
-                continue
-
-        # --- punctuation (deterministic) ---
-        if ch in PUNCT:
-            out.append(PUNCT[ch])
-            out_len += 1
-            i += 1
-            continue
-
-        # --- superscript/subscript: formula (letter/= subscript) → LaTeX, else Markdown ---
-        if ch in SUPERSCRIPT_MAP or ch in SUBSCRIPT_MAP:
-            sub_chain, sup_chain = [], []
-            j = i
-            while j < n and text[j] in SUBSCRIPT_MAP:
-                sub_chain.append(SUBSCRIPT_MAP[text[j]])
-                j += 1
-            while j < n and text[j] in SUPERSCRIPT_MAP:
-                sup_chain.append(SUPERSCRIPT_MAP[text[j]])
-                j += 1
-            letters = [v for v in sub_chain + sup_chain if v.isalpha()]
-            has_eq = "=" in sub_chain or "=" in sup_chain
-            if letters or has_eq:
-                # confirmed formula (aⱼ → $a_j$, xᵢ₌₁ⁿ → $x_{i=1}^n$);
-                # look back for the ASCII base variable already emitted
-                k = i
-                while k > 0 and text[k - 1].isascii() and text[k - 1].isalnum():
-                    k -= 1
-                base = text[k:i]
-                if base and out and "".join(out[-len(base):]) == base:
-                    del out[-len(base):]
-                    out_len -= len(base)
-                block = "$" + base
-                if sub_chain:
-                    s = "".join(sub_chain)
-                    block += ("_" + s) if len(s) == 1 else "_{" + s + "}"
-                if sup_chain:
-                    s = "".join(sup_chain)
-                    block += ("^" + s) if len(s) == 1 else "^{" + s + "}"
-                block += "$"
-                emit_math(block)
-                i = j
-                continue
-            # uncertain/plain (H₂O, m², s⁻¹) → Markdown
-            if sub_chain:
-                out.append("~" + "".join(sub_chain) + "~")
-                out_len += len(sub_chain) + 2
-            if sup_chain:
-                out.append("^" + "".join(sup_chain) + "^")
-                out_len += len(sup_chain) + 2
-            i = j
-            continue
-
-        # --- Greek letters: plain text → English name ---
-        # math vs text 归属是语义判断（效率 η → $\eta$；beta 测试 → beta），
-        # 脚本一律标记进 amb.json，由 LLM 按决策树二次判断，不静默决定。
-        if ch in GREEK_LOWER or ch in GREEK_UPPER:
-            name = GREEK_LOWER[ch] if ch in GREEK_LOWER else GREEK_UPPER[ch]
-            latex = GREEK_LATEX.get(ch)
-            # Scope lookahead: Δ/δ prefixing an ASCII identifier (ΔLOO-IC,
-            # ΔT, δ¹³C) — the Greek letter's scope covers the whole
-            # identifier, not the letter alone. Suggest the whole form so a
-            # reviewer never produces a lone $\Delta$ glued to bare text.
-            if ch in "Δδ" and i + 1 < n:
-                j = i + 1
-                while j < n:
-                    c = text[j]
-                    if c in SUPERSCRIPT_MAP or c in SUBSCRIPT_MAP:
-                        j += 1
-                    elif c.isascii() and (c.isalnum() or c == "-"):
-                        j += 1
-                    else:
-                        break
-                if j > i + 1:
-                    ident = text[i + 1:j]
-                    scope = ch + ident
-                    math_suffix = _ident_to_math(ident)
-                    md_suffix = _ident_to_md(ident)
-                    text_suffix = name + " " + md_suffix
-                    # \Delta + bare letter needs a space (\Delta T), otherwise
-                    # \DeltaT parses as an undefined command in LaTeX
-                    sep = " " if math_suffix[:1].isalpha() else ""
-                    suggestion = (f"${latex}{sep}{math_suffix}$ (math) or "
-                                  f"{text_suffix} (plain text)")
-                    mark(ch, "Greek prefix + identifier: one scope "
-                             "(ΔLOO-IC → $\\Delta\\mathrm{LOO\\text{-}IC}$)",
-                         suggestion, scope=scope,
-                         token=_normalize_token(scope))
-                    out.append(name + md_suffix)
-                    out_len += len(name) + len(md_suffix)
-                    i = j
-                    continue
-            suggestion = f"${latex}$ (math) or {name} (plain text)" if latex else f"{name} (plain text)"
-            mark(ch, "Greek letter: math vs plain text", suggestion,
-                 token=name)
-            out.append(name)
-            out_len += len(name)
-            i += 1
-            continue
-
-        # --- √ with argument (√5, √x, √(x+1)) → $\sqrt{...}$ ---
-        if ch == "√":
-            m = SQRT_ARG_RE.match(text, i)
-            if m:
-                arg = m.group(1)
-                j = m.end()
-                # absorb trailing superscript into the radical (√x² → $\sqrt{x^2}$)
-                sup = ""
-                while j < n and text[j] in SUPERSCRIPT_MAP:
-                    sup += SUPERSCRIPT_MAP[text[j]]
-                    j += 1
-                if sup:
-                    arg += "^{" + sup + "}"
-                block = r"$\sqrt{" + arg + "}$"
-                emit_math(block)
-                i = j
-                continue
-            mark("√", "square root: argument expected (√5 → $\\sqrt{5}$)", r"$\sqrt{<arg>}$")
-            emit_math(r"$\sqrt{}$")
-            i += 1
-            continue
-
-        # --- math operators outside math mode ---
-        if ch in INLINE_OPS:
-            # ∑/∫/∏ absorb the following expression into one math block
-            # (∑x² → $\sum x^2$, ∫0¹ x² dx → $\int 0^1 x^2 dx$) to avoid
-            # mixing LaTeX operators with Markdown superscripts
-            if ch in "∑∫∏":
-                cmd = MATH_OPS[ch]
-                parts: list[str] = []
-                cur: list[str] = []
-                first = True
-                j = i + 1
-
-                def flush_block() -> None:
-                    nonlocal first
-                    expr = "".join(cur).strip()
-                    cur.clear()
-                    if not expr:
-                        return
-                    # trailing binary op absorbed but not followed by an operand
-                    # (∫0¹ x² dx + ∑yᵢ) belongs outside the math block
-                    tail = ""
-                    while expr and expr[-1] in "+-=":
-                        tail = expr[-1] + tail
-                        expr = expr[:-1].strip()
-                    if expr:
-                        math = convert_math_mode(expr)
-                        sep = " " if first and not math.startswith(("_", "^")) else ""
-                        parts.append("$" + (cmd if first else "") + sep + math + "$")
-                        first = False
-                    if tail:
-                        parts.append(tail)
-
-                while j < n:
-                    c = text[j]
-                    if c in SUPERSCRIPT_MAP or c in SUBSCRIPT_MAP or c in MATH_CONTINUE:
-                        cur.append(c)
-                        j += 1
-                    elif c == " ":
-                        k = j
-                        while k < n and text[k] == " ":
-                            k += 1
-                        if k < n and (text[k] in SUPERSCRIPT_MAP or text[k] in SUBSCRIPT_MAP or
-                                      text[k] in MATH_CONTINUE or
-                                      text[k] in "和与及或到至"):
-                            cur.append(" ")
-                            j = k
-                            continue
-                        break
-                    elif c in "和与及或" or c in "到至":
-                        if c in "到至":
-                            # summation bounds (∑ i=1 到 n → $\sum_{i=1}^{n}$)
-                            lower = "".join(cur).strip()
-                            k = j + 1
-                            while k < n and text[k] == " ":
-                                k += 1
-                            upper = ""
-                            while k < n and (text[k] in SUPERSCRIPT_MAP or
-                                             text[k] in SUBSCRIPT_MAP or
-                                             (text[k].isascii() and text[k] in MATH_EXPR_CHARS)):
-                                upper += text[k]
-                                k += 1
-                            upper = upper.strip()
-                            if lower and upper:
-                                parts.append("$" + cmd + "_{" +
-                                             convert_math_mode(lower) + "}^{" +
-                                             convert_math_mode(upper) + "}$")
-                                first = False
-                                cur = []
-                                j = k
-                                continue
-                            break
-                        # conjunction (和/与/及/或): close current block, emit
-                        # conjunction as text, absorb next expr into its own block
-                        flush_block()
-                        parts.append(c)
-                        j += 1
-                        continue
-                    else:
-                        break
-                flush_block()
-                block = "".join(parts)
-                emit_math(block)
-                i = j
-                continue
-            # × in plain text → ASCII x (dimension descriptions, etc.)
-            if ch == "×":
-                out.append("x")
-                out_len += 1
-                i += 1
-                continue
-            # · between CJK chars (北京·上海) → keep as-is (CJK interpunct
-            # is legitimate Unicode punctuation, same family as ，。)
-            if ch == "·":
-                prev_ch = text[i - 1] if i > 0 else ""
-                next_ch = text[i + 1] if i + 1 < n else ""
-                is_cjk_sep = (prev_ch.isalpha() and not prev_ch.isascii()) or \
-                             (next_ch.isalpha() and not next_ch.isascii())
-                if is_cjk_sep:
-                    out.append("·")
-                    out_len += 1
-                    i += 1
-                    continue
-                # non-CJK stray ·: default to math, flag for LLM verification
-                mark("·", "interpunct: CJK separator vs math multiplication",
-                     "CJK context → keep ·; math → $\\cdot$")
-                emit_math(r"$\cdot$")
-                i += 1
-                continue
-            # ±/∓ followed by a number: absorb value into one math block ($\pm 2\%$)
-            if ch in ("±", "∓") and VALUE_AFTER_SIGN.match(text, i):
-                m = VALUE_AFTER_SIGN.match(text, i)
-                num = m.group(1).replace("%", r"\%")
-                block = "$" + MATH_OPS[ch] + " " + num + "$"
-                emit_math(block)
-                i = m.end()
-                continue
-            emit_math(INLINE_OPS[ch])
-            i += 1
-            continue
-
-        out.append(ch)
-        out_len += 1
-        i += 1
-
-    return "".join(out)
-
-
-def process(text: str, use_context: bool = True) -> tuple[str, list[dict]]:
-    """Main pipeline: math spans + plain text, offsets relative to final output."""
-    ambiguous: list[dict] = []
-
-    # Pass 0: document-level consistency evidence (confirmed math/markdown
-    # tokens), used to sharpen ambiguous suggestions in Pass 2.
-    ctx = DocContext(text) if use_context else None
-
-    # Pass 1: convert $...$ math spans (position-aware via re.sub callback)
-    math_offsets: list[tuple[int, int]] = []
-
-    def math_cb(m: re.Match) -> str:
-        math_offsets.append((m.start(), m.end()))
-        return convert_math_mode(m.group(0))
-
-    math_done = MATH_BLOCK.sub(math_cb, text)
-
-    # Pass 2: convert the rest (everything not inside a math span).
-    # base_offset tracks the cumulative OUTPUT length so ambiguous offsets
-    # land correctly in the final assembled string.
-    out_parts = []
-    out_len = 0
-    cursor = 0
-    for start, end in sorted(math_offsets):
-        seg = convert_plain(math_done[cursor:start], ambiguous, out_len, ctx)
-        out_parts.append(seg)
-        out_len += len(seg)
-        out_parts.append(math_done[start:end])
-        out_len += len(math_done[start:end])
-        cursor = end
-    seg = convert_plain(math_done[cursor:], ambiguous, out_len, ctx)
-    out_parts.append(seg)
-    converted = "".join(out_parts)
-
-    # Pass 3: report any remaining non-ASCII that is not CJK (dedupe by offset)
-    reported = {e["offset"] for e in ambiguous}
-    for m in LEFTOVER.finditer(converted):
-        if m.start() in reported:
-            continue
-        ch = m.group(0)
-        # CJK, ° (degree), and · (U+00B7) are legitimate: CJK interpuncts
-        # (列夫·托尔斯泰) are kept by convert_plain; any non-CJK · would
-        # already have been converted to $\cdot$ there
-        if CJK.match(ch) or ch == "\u00b0" or ch == "\u00b7":
-            continue
-        ambiguous.append({
-            "offset": m.start(),
-            "char": ch,
-            "code_point": f"U+{ord(ch):04X}",
-            "reason": "unresolved non-ASCII character",
-            "suggestion": None,
-            "context": converted[max(0, m.start() - 25):m.start() + 26].replace("\n", " "),
-        })
-
-    return converted, ambiguous
-
-
-# --------------------------------------------------------------------------
-# Mixing (混杂) audit
-# --------------------------------------------------------------------------
-
-# LaTeX + Markdown markers mixed inside one unit — the anti-patterns the
-# decision tree forbids. Blocks are located with MATH_BLOCK (same $...$
-# semantics as the converter) so boundaries never cross spaces or CJK.
-SPLIT_FORMULA_RE = re.compile(r"\$[^$\n]+\$\s*[-+]\s*\$[^$\n]+\$")
-
-
-def check_mixing(text: str) -> list[dict]:
-    """Scan text for LaTeX/Markdown mixing patterns (混杂). Returns
-    {offset, pattern, match, context} hits sorted by offset."""
-    hits = []
-    for m in MATH_BLOCK.finditer(text):
-        offset = m.start()
-        block = m.group(0)
-        content = block[1:-1]
-        after = text[m.end():m.end() + 1]
-        ctx = text[max(0, offset - 25):m.end() + 25].replace("\n", " ")
-        if CJK.search(content):
-            hits.append({"offset": offset, "pattern": "CJK inside math block",
-                         "match": block, "context": ctx})
-        if after == "$":
-            hits.append({"offset": offset, "pattern": "adjacent math blocks without space",
-                         "match": block, "context": ctx})
-        elif after.isascii() and after.isalnum():
-            hits.append({"offset": offset, "pattern": "math block glued to bare text",
-                         "match": block, "context": ctx})
-        elif after and after in "^~":
-            hits.append({"offset": offset, "pattern": "math block followed by Markdown super/subscript",
-                         "match": block, "context": ctx})
-        if SPLIT_FORMULA_RE.match(text, offset):
-            hits.append({"offset": offset, "pattern": "operator between math blocks (split formula)",
-                         "match": SPLIT_FORMULA_RE.match(text, offset).group(0),
-                         "context": ctx})
-    hits.sort(key=lambda h: h["offset"])
-    return hits
-
-
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
@@ -912,20 +599,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input", help="input file (use - for stdin)")
+    ap.add_argument("--annotations", metavar="JSON",
+                    help="apply AI-classified annotations to the input")
     ap.add_argument("-o", "--output", help="output file (default: stdout)")
-    ap.add_argument("--amb-out", help="write ambiguity report JSON to this file")
-    ap.add_argument("--in-place", action="store_true",
-                    help="overwrite the input file (also writes <input>.amb.json)")
     ap.add_argument("--json", action="store_true",
-                    help="print machine-readable JSON summary instead of text")
-    ap.add_argument("--no-ambiguous-marker", action="store_true",
-                    help="do not embed [AMBIGUOUS ...] markers in the text output")
-    ap.add_argument("--check-mixing", action="store_true",
-                    help="scan output for LaTeX/Markdown mixing patterns; "
-                         "exit 2 if any found")
-    ap.add_argument("--no-context", action="store_true",
-                    help="disable document-level consistency evidence "
-                         "(Pass 0 pre-scan) in ambiguous suggestions")
+                    help="print machine-readable JSON report instead of text")
+    ap.add_argument("--leftover", action="store_true",
+                    help="list remaining non-ASCII chars as factual evidence")
     args = ap.parse_args()
 
     if args.input == "-":
@@ -939,57 +619,47 @@ def main() -> int:
         text = src.read_text(encoding="utf-8")
         src_name = str(src)
 
-    converted, ambiguous = process(text, use_context=not args.no_context)
+    if args.annotations is None:
+        # Pure evidence mode: list non-ASCII characters for the AI's check.
+        report = {"source": src_name, "leftover": leftover_nonascii(text)}
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
 
-    # Embed markers unless suppressed
-    if ambiguous and not args.no_ambiguous_marker and not args.json:
-        markers = {e["offset"]: f"[AMBIGUOUS: {e['code_point']} {e['char']}]"
-                   for e in ambiguous}
-        pieces = []
-        for idx, ch in enumerate(converted):
-            pieces.append(ch)
-            if idx in markers:
-                pieces.append(markers[idx])
-        converted = "".join(pieces)
+    # Execution mode: validate, render, apply.
+    ann_path = Path(args.annotations)
+    if not ann_path.exists():
+        print(f"error: no such annotations file: {args.annotations}", file=sys.stderr)
+        return 1
+    annotations = json.loads(ann_path.read_text(encoding="utf-8"))
+    if isinstance(annotations, dict) and "annotations" in annotations:
+        annotations = annotations["annotations"]
+    if not isinstance(annotations, list):
+        print("error: annotations must be a JSON array of "
+              "{offset, scope, kind} objects", file=sys.stderr)
+        return 1
+
+    errors = validate_annotations(text, annotations)
+    if errors:
+        print(f"error: {len(errors)} invalid annotation(s):", file=sys.stderr)
+        for e in errors[:20]:
+            print(f"  {e}", file=sys.stderr)
+        return 1
+
+    converted = apply_annotations(text, annotations)
 
     if args.json:
-        stats = {
+        print(json.dumps({
             "source": src_name,
-            "ambiguous_count": len(ambiguous),
-            "ambiguous": ambiguous,
-            "mixing_count": 0,
-            "mixing": [],
+            "applied": len(annotations),
             "output": converted,
-        }
-        if args.check_mixing:
-            mixing = check_mixing(converted)
-            stats["mixing_count"] = len(mixing)
-            stats["mixing"] = mixing
-        print(json.dumps(stats, ensure_ascii=False, indent=2))
+            "leftover": leftover_nonascii(converted),
+        }, ensure_ascii=False, indent=2))
     elif args.output:
         Path(args.output).write_text(converted, encoding="utf-8")
         print(f"wrote {args.output} ({len(converted)} chars, "
-              f"{len(ambiguous)} ambiguous)", file=sys.stderr)
+              f"{len(annotations)} applied)", file=sys.stderr)
     else:
         print(converted, end="")
-
-    if args.check_mixing and not args.json:
-        mixing = check_mixing(converted)
-        if mixing:
-            print(f"{len(mixing)} mixing violation(s):", file=sys.stderr)
-            for h in mixing:
-                print(f"  @{h['offset']}: {h['pattern']}  "
-                      f"match={h['match']!r}  ...{h['context']}...",
-                      file=sys.stderr)
-            return 2
-
-    if args.amb_out:
-        Path(args.amb_out).write_text(
-            json.dumps(ambiguous, ensure_ascii=False, indent=2), encoding="utf-8")
-    if args.in_place and args.input != "-":
-        Path(args.input).write_text(converted, encoding="utf-8")
-        Path(str(args.input) + ".amb.json").write_text(
-            json.dumps(ambiguous, ensure_ascii=False, indent=2), encoding="utf-8")
 
     return 0
 
