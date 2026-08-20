@@ -33,6 +33,8 @@ python3 unicode_purify.py <input> -o <output> --amb-out amb.json
 
 **如何判断"确认是公式"**：上下标含**字母**（`aⱼ`、`xᵢ`）或含 `=`（`xᵢ₌₁ⁿ`）→ 数学变量下标，确认公式 → LaTeX（`$a_j$`、`$x_{i=1}^{n}$`）；只有数字（`H₂O`、`m²`、`s⁻¹`）→ 单位/化学式 → Markdown。`∑`/`∫`/`∏` 出现 → 确认公式。
 
+**文档级一致性（上下文判定）**：同一 token 在全文中出现多次时，优先复用它**此前被确认的形态**。脚本自动两遍扫描：Pass 0 预扫全文，把 `$...$` 数学块内的 token 记入 math 集、作者手写的 `^ ^`/`~ ~` Markdown 上标记入 md 集；Pass 2 遇到歧义 token 时查表，命中则在建议后追加 `[context: LaTeX/math]` 或 `[context: Markdown/text]`（近因加权：同段落证据优先于全文）；同一 token 两集都有 → 追加 `[CONFLICT]`，不猜测，留给决策树复核。如 `式中 $\eta$ 为效率，η 值取 95%` → 第二个 `η` 建议 `[context: LaTeX/math]`；`delta^13^C 含量，以及 δ¹³C 值` → `δ¹³C` 建议 `[context: Markdown/text]`。匹配用归一化键（`f_exp`/`f_{exp}`/`f~exp~`/`fₑₓₚ` 同键），不做原文比对。关闭：`--no-context`。
+
 **作用范围界定（scope）**：一个特殊字符 + 它的语义操作数 = **一个整体**，转换必须整体进行，不能只换字符。`Δ`/`δ` 后紧跟 ASCII 标识符（`ΔLOO-IC`、`ΔT`、`δ¹³C`）→ 前瞻吸收整体转换（`DeltaLOO-IC` → amb 建议 `$\Delta\mathrm{LOO\text{-}IC}$`、`DeltaT` → `$\Delta T$`、`delta^13^C` → `$\delta^{13}{\mathrm{C}}$`）；后跟空格/中文/句号 → 孤立希腊字母（`Δ G` 的 `Δ`）。同理 `±2%` 是 `$\pm 2\%$` 整体，`$\pm$2%` 是拆散反例。
 
 优先级总原则：**确认文字 → Markdown；确认公式 → LaTeX；不确定 → Markdown 兜底；绝不混杂**（同一表达式内禁止混用 `$...$` 与 `^ ^`/`~ ~`；中文绝不放进 LaTeX）。

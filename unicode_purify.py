@@ -118,6 +118,175 @@ VALUE_AFTER_SIGN = re.compile(r"[±∓]\s*(\d[\d.,]*%?)")
 # expression; ASCII-only so superscripts (√x²) stay out of the radical
 SQRT_ARG_RE = re.compile(r"√\s*([0-9A-Za-z_.]+|\([^)]*\))")
 
+# --------------------------------------------------------------------------
+# Document-level consistency (上下文一致性): Pass 0 pre-scan
+# --------------------------------------------------------------------------
+
+# An author-written Markdown token with super/subscripts: m^2^, H~2~O, 10^6^
+MD_TOKEN_RE = re.compile(r"(?:[A-Za-z0-9]+|\^[^^\n]+\^|~[^^~\n]+~)+")
+
+
+def _normalize_token(s: str) -> str:
+    """Canonical form of an entity regardless of how it was written, so
+    different spellings of the same variable/unit map to one key:
+      f_exp, f_{exp}, f~exp~, fₑₓₚ        → f[exp]
+      m^2^, m², m^{2}                     → m[^2]
+      δ¹³C, delta^13^C, \\delta^{13}\\mathrm{C} → delta[^13]C
+    Single-pass scanner (regex chains would re-wrap their own [^...]
+    markers). Used only for matching; never emitted into output."""
+    s = s.strip()
+    for g, name in {**GREEK_LOWER, **GREEK_UPPER}.items():
+        s = s.replace(g, name)
+    s = s.lower()
+    out: list[str] = []
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if c in SUPERSCRIPT_MAP:
+            j = i + 1
+            while j < n and s[j] in SUPERSCRIPT_MAP:
+                j += 1
+            chain = "".join(SUPERSCRIPT_MAP[x] for x in s[i:j])
+            out.append("[^" + chain + "]")
+            i = j
+        elif c in SUBSCRIPT_MAP:
+            j = i + 1
+            while j < n and s[j] in SUBSCRIPT_MAP:
+                j += 1
+            chain = "".join(SUBSCRIPT_MAP[x] for x in s[i:j])
+            out.append("[" + chain + "]")
+            i = j
+        elif c == "\\":
+            m = re.match(r"\\(?:mathrm|text)\{([^}]*)\}", s[i:])
+            if m:
+                out.append(m.group(1))
+                i += len(m.group(0))
+            else:
+                m = re.match(r"\\[a-zA-Z]+", s[i:])
+                if m:
+                    out.append(m.group(0)[1:])
+                    i += len(m.group(0))
+                else:
+                    i += 1
+        elif c == "^":
+            m = re.match(r"\^\{([^}]*)\}", s[i:])
+            if m:
+                out.append("[^" + m.group(1) + "]")
+                i += len(m.group(0))
+            else:
+                m = re.match(r"\^([^^~]+)\^", s[i:])
+                if m:
+                    out.append("[^" + m.group(1) + "]")
+                    i += len(m.group(0))
+                else:
+                    m = re.match(r"\^[a-zA-Z0-9]", s[i:])
+                    if m:
+                        out.append("[^" + m.group(0)[1:] + "]")
+                        i += 2
+                    else:
+                        i += 1
+        elif c == "_":
+            m = re.match(r"_\{([^}]*)\}", s[i:])
+            if m:
+                out.append("[" + m.group(1) + "]")
+                i += len(m.group(0))
+            else:
+                m = re.match(r"_([a-zA-Z0-9]+)", s[i:])
+                if m:
+                    out.append("[" + m.group(1) + "]")
+                    i += len(m.group(0))
+                else:
+                    i += 1
+        elif c == "~":
+            m = re.match(r"~([^^~]+)~", s[i:])
+            if m:
+                out.append("[" + m.group(1) + "]")
+                i += len(m.group(0))
+            else:
+                i += 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _math_block_tokens(content: str) -> list[str]:
+    """Tokens inside a $...$ math span, e.g. 'f_{exp} + g^2' →
+    ['f[exp]', 'g[^2]']."""
+    pieces = re.split(r"[\s+\-*/=()<>,.;:|]+", content.strip("$"))
+    out = []
+    for p in pieces:
+        if p and any(c.isalnum() for c in p):
+            t = _normalize_token(p)
+            if t and re.search(r"[a-z0-9]", t):
+                out.append(t)
+    return out
+
+
+class DocContext:
+    """Pass 0 evidence: which normalized tokens appear in confirmed math
+    ($...$) vs confirmed Markdown (author-written ^ ^ / ~ ~) contexts.
+    A later ambiguous token that matches one of these gets a consistency
+    hint instead of a neutral suggestion."""
+
+    def __init__(self, text: str):
+        self.math: dict[str, list[int]] = {}
+        self.md: dict[str, list[int]] = {}
+        para_start = 0
+        self.paras: list[tuple[int, int]] = []
+        for m in re.finditer(r"\n\s*\n", text):
+            self.paras.append((para_start, m.start()))
+            para_start = m.end()
+        self.paras.append((para_start, len(text)))
+
+        math_spans = [m.span() for m in MATH_BLOCK.finditer(text)]
+        for s, e in math_spans:
+            for t in _math_block_tokens(text[s:e]):
+                self.math.setdefault(t, []).append(s)
+        for m in MD_TOKEN_RE.finditer(text):
+            if m.group(0).startswith(("^", "~")):
+                continue
+            # skip tokens inside $...$ math spans: \eta would normalize to
+            # "eta" and falsely claim a Markdown confirmation for it
+            if any(s <= m.start() < e for s, e in math_spans):
+                continue
+            # skip ASCII runs that are the tail of a Unicode entity
+            # (δ¹³C → the trailing C is part of the isotope, not a token)
+            prev = text[m.start() - 1] if m.start() > 0 else ""
+            if prev in SUPERSCRIPT_MAP or prev in SUBSCRIPT_MAP or \
+               prev in GREEK_LOWER or prev in GREEK_UPPER:
+                continue
+            t = _normalize_token(m.group(0))
+            if t and re.search(r"[a-z0-9]", t):
+                self.md.setdefault(t, []).append(m.start())
+
+    def _proximity(self, a: int, b: int) -> str:
+        for s, e in self.paras:
+            if s <= a < e and s <= b < e:
+                return "same paragraph"
+        return "document-level"
+
+    def evidence(self, token: str, offset: int) -> dict | None:
+        """Nearest confirmed occurrence for token, or None if unknown.
+        Returns {kind: 'math'|'md', offset, distance, proximity} or
+        {conflict: True, math_offsets, md_offsets} when both contexts exist."""
+        m_offs = self.math.get(token) or []
+        d_offs = self.md.get(token) or []
+        if not m_offs and not d_offs:
+            return None
+        if m_offs and d_offs:
+            return {"conflict": True,
+                    "math_offsets": m_offs[:3], "md_offsets": d_offs[:3]}
+        if m_offs:
+            off = min(m_offs, key=lambda o: abs(o - offset))
+            return {"kind": "math", "offset": off,
+                    "distance": abs(off - offset),
+                    "proximity": self._proximity(off, offset)}
+        off = min(d_offs, key=lambda o: abs(o - offset))
+        return {"kind": "md", "offset": off,
+                "distance": abs(off - offset),
+                "proximity": self._proximity(off, offset)}
+
 # Anything non-ASCII that we did not resolve (excluding CJK and CJK punct)
 CJK = re.compile(r"[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef\u2014\u2018\u2019\u201c\u201d]")
 LEFTOVER = re.compile(r"[^\x00-\x7f]")
@@ -298,7 +467,8 @@ def _ident_to_md(ident: str) -> str:
     return "".join(parts)
 
 
-def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
+def convert_plain(text: str, ambiguous: list[dict], base_offset: int,
+                  ctx: DocContext | None = None) -> str:
     """Convert non-math text. Returns converted string; appends ambiguous hits
     with offsets relative to the final assembled output (base_offset + len(out))."""
     out: list[str] = []
@@ -307,20 +477,39 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
     n = len(text)
 
     def mark(ch: str, reason: str, suggestion: str | None,
-             scope: str | None = None) -> None:
+             scope: str | None = None, token: str | None = None) -> None:
         # scope: whole unit the character belongs to (e.g. ΔLOO-IC) — the
         # suggestion then covers the whole scope, so a reviewer never
         # replaces just the character and splits the unit (mixing).
+        # token: normalized canonical form for document-level consistency
+        # lookup (f_exp / f_{exp} / f~exp~ → f[exp]).
         start = max(0, i - 25)
-        ctx = text[start:i + 26].replace("\n", " ")
-        ambiguous.append({
+        ctx_text = text[start:i + 26].replace("\n", " ")
+        entry = {
             "offset": base_offset + out_len,
             "char": scope or ch,
             "code_point": f"U+{ord((scope or ch)[0]):04X}",
             "reason": reason,
             "suggestion": suggestion,
-            "context": ctx,
-        })
+            "context": ctx_text,
+        }
+        if token is not None and ctx is not None:
+            ev = ctx.evidence(token, i)
+            if ev:
+                if ev.get("conflict"):
+                    entry["consistency"] = ("document shows this token in BOTH math "
+                                            f"{ev['math_offsets']} and markdown "
+                                            f"{ev['md_offsets']}")
+                    if suggestion:
+                        suggestion += " [CONFLICT]"
+                else:
+                    kind = "LaTeX/math" if ev["kind"] == "math" else "Markdown/text"
+                    entry["consistency"] = (f"seen as {kind} at offset {ev['offset']} "
+                                            f"({ev['proximity']})")
+                    if suggestion:
+                        suggestion += f" [context: {kind}]"
+                entry["suggestion"] = suggestion
+        ambiguous.append(entry)
 
     def emit_math(block: str) -> None:
         nonlocal out_len
@@ -365,7 +554,8 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
             if "·" in run:
                 block = "$" + convert_product_expr(run) + "$"
                 mark("·", "unit product: letters assumed SI units (upright); verify variables are italic",
-                     "units → \\mathrm{}, variables → italic")
+                     "units → \\mathrm{}, variables → italic",
+                     token=_normalize_token(run))
                 emit_math(block)
                 i += len(run)
                 continue
@@ -453,13 +643,15 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
                                   f"{text_suffix} (plain text)")
                     mark(ch, "Greek prefix + identifier: one scope "
                              "(ΔLOO-IC → $\\Delta\\mathrm{LOO\\text{-}IC}$)",
-                         suggestion, scope=scope)
+                         suggestion, scope=scope,
+                         token=_normalize_token(scope))
                     out.append(name + md_suffix)
                     out_len += len(name) + len(md_suffix)
                     i = j
                     continue
             suggestion = f"${latex}$ (math) or {name} (plain text)" if latex else f"{name} (plain text)"
-            mark(ch, "Greek letter: math vs plain text", suggestion)
+            mark(ch, "Greek letter: math vs plain text", suggestion,
+                 token=name)
             out.append(name)
             out_len += len(name)
             i += 1
@@ -614,9 +806,13 @@ def convert_plain(text: str, ambiguous: list[dict], base_offset: int) -> str:
     return "".join(out)
 
 
-def process(text: str) -> tuple[str, list[dict]]:
+def process(text: str, use_context: bool = True) -> tuple[str, list[dict]]:
     """Main pipeline: math spans + plain text, offsets relative to final output."""
     ambiguous: list[dict] = []
+
+    # Pass 0: document-level consistency evidence (confirmed math/markdown
+    # tokens), used to sharpen ambiguous suggestions in Pass 2.
+    ctx = DocContext(text) if use_context else None
 
     # Pass 1: convert $...$ math spans (position-aware via re.sub callback)
     math_offsets: list[tuple[int, int]] = []
@@ -634,13 +830,13 @@ def process(text: str) -> tuple[str, list[dict]]:
     out_len = 0
     cursor = 0
     for start, end in sorted(math_offsets):
-        seg = convert_plain(math_done[cursor:start], ambiguous, out_len)
+        seg = convert_plain(math_done[cursor:start], ambiguous, out_len, ctx)
         out_parts.append(seg)
         out_len += len(seg)
         out_parts.append(math_done[start:end])
         out_len += len(math_done[start:end])
         cursor = end
-    seg = convert_plain(math_done[cursor:], ambiguous, out_len)
+    seg = convert_plain(math_done[cursor:], ambiguous, out_len, ctx)
     out_parts.append(seg)
     converted = "".join(out_parts)
 
@@ -727,6 +923,9 @@ def main() -> int:
     ap.add_argument("--check-mixing", action="store_true",
                     help="scan output for LaTeX/Markdown mixing patterns; "
                          "exit 2 if any found")
+    ap.add_argument("--no-context", action="store_true",
+                    help="disable document-level consistency evidence "
+                         "(Pass 0 pre-scan) in ambiguous suggestions")
     args = ap.parse_args()
 
     if args.input == "-":
@@ -740,7 +939,7 @@ def main() -> int:
         text = src.read_text(encoding="utf-8")
         src_name = str(src)
 
-    converted, ambiguous = process(text)
+    converted, ambiguous = process(text, use_context=not args.no_context)
 
     # Embed markers unless suppressed
     if ambiguous and not args.no_ambiguous_marker and not args.json:

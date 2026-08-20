@@ -23,5 +23,20 @@
     "id": 5,
     "prompt": "检查并修正这段 AI 生成的文本中的混杂问题（LaTeX 与 Markdown 混用）：结果为 $\\sum$x^2^，误差 $\\pm$2%，相关性 $a_i$$b_j$。",
     "expected": "结果为 $\\sum x^2$（符号与上标整体进一个环境），误差 $\\pm 2\\%$（±与数值整体），相关性 $a_i$ $b_j$（相邻公式块加空格）"
+  },
+  {
+    "id": 6,
+    "prompt": "转换以下文本中的 Unicode 字符：式中 $\\eta$ 为效率，η 值取 95%。",
+    "expected": "η 应复用前文 $\\eta$ 的 LaTeX 形态（文档级一致性：同 token 在 math 上下文出现过 → 建议 [context: LaTeX/math]）"
+  },
+  {
+    "id": 7,
+    "prompt": "转换以下文本中的 Unicode 字符：delta^13^C 含量，以及 δ¹³C 值。",
+    "expected": "δ¹³C 应复用前文 delta^13^C 的 Markdown 形态（同 token 在 Markdown 上下文出现过 → 建议 [context: Markdown/text]）"
+  },
+  {
+    "id": 8,
+    "prompt": "转换以下文本中的 Unicode 字符：效率 $\\eta$ 为 0.9，eta 是希腊字母，η 符号。",
+    "expected": "η 同时出现在 math 与 text 上下文 → 标 [CONFLICT]，不猜测，留决策树复核"
   }
 ]
