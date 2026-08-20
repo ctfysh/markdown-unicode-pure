@@ -7,7 +7,7 @@
   {
     "id": 2,
     "prompt": "按 markdown-unicode-pure 流程处理（判定→标注→apply→终检）：根据 E=mc²，第 2nd 章讨论了 ¹⁴C 的衰变。加速度单位是 m/s²，浓度范围 0.1−0.5 mol/L。给出 annotations.json 与最终输出。",
-    "expected": "annotations: [{\"offset\": 3, \"scope\": \"E=mc²\", \"kind\": \"markdown_super\"}, {\"offset\": 20, \"scope\": \"¹⁴C\", \"kind\": \"markdown_super\"}, {\"offset\": 36, \"scope\": \"m/s²\", \"kind\": \"markdown_super\"}, {\"offset\": 50, \"scope\": \"−\", \"kind\": \"punct\"}]；输出：根据 E=mc^2^，第 2nd 章讨论了 ^14^C 的衰变。加速度单位是 m/s^2^，浓度范围 0.1-0.5 mol/L。"
+    "expected": "annotations: [{\"offset\": 3, \"scope\": \"E=mc²\", \"kind\": \"markdown_super\"}, {\"offset\": 20, \"scope\": \"¹⁴C\", \"kind\": \"markdown_super\"}, {\"offset\": 35, \"scope\": \"m/s²\", \"kind\": \"markdown_super\"}, {\"offset\": 48, \"scope\": \"−\", \"kind\": \"math_op\"}]；输出：根据 E=mc^2^，第 2nd 章讨论了 ^14^C 的衰变。加速度单位是 m/s^2^，浓度范围 0.1-0.5 mol/L。"
   },
   {
     "id": 3,
@@ -37,6 +37,6 @@
   {
     "id": 8,
     "prompt": "按 markdown-unicode-pure 流程处理（判定→标注→apply→终检），注意文档级一致性：式中 $\\eta$ 为效率，η 值取 95%。delta^13^C 含量，以及 δ¹³C 值。给出 annotations.json 与最终输出。",
-    "expected": "annotations: [{\"offset\": 15, \"scope\": \"η\", \"kind\": \"greek_math\"}, {\"offset\": 17, \"scope\": \"δ¹³C\", \"kind\": \"greek_prefix_md\"}]（$\\eta$ 已是 LaTeX 保留；η 复用前文 math 形态 → greek_math；δ¹³C 复用前文 Markdown 形态 → greek_prefix_md）；输出：式中 $\\eta$ 为效率，$\\eta$ 值取 95%。delta^13^C 含量，以及 delta^13^C 值。"
+    "expected": "annotations: [{\"offset\": 14, \"scope\": \"η\", \"kind\": \"greek_math\"}, {\"offset\": 40, \"scope\": \"δ¹³C\", \"kind\": \"greek_prefix_md\"}]（$\\eta$ 已是 LaTeX 保留；η 复用前文 math 形态 → greek_math；δ¹³C 复用前文 Markdown 形态 → greek_prefix_md）；输出：式中 $\\eta$ 为效率，$\\eta$ 值取 95%。delta^13^C 含量，以及 delta^13^C 值。"
   }
 ]

@@ -20,12 +20,15 @@ description: 严禁所有 Unicode 特殊字符（上下标、数学符号、希�
 │     渲染：按 kind 查表 → 应用（右到左）
 │
 ├─ AI 读 out.md，对照原文核查：是否全部解决？是否引入混用/错用？
-│     python3 unicode_purify.py out.md --leftover   # 剩余非 ASCII 证据（CJK/合法符号已过滤）
+│     python3 unicode_purify.py out.md   # 全量证据报告（无 flag）
+│       └ leftover    剩余非 ASCII（CJK/合法符号已过滤）
+│       └ latex_units 单位/数量级被写进 LaTeX（yr$^{-1}$ 等，ASCII 不可见违规）
+│       └ mixing      LaTeX 与纯文本混用（= 号外置、运算符拆分、箭头+LaTeX 等）
 │
 └─ 未清 → 补标注重新 apply → 循环，直到所有问题解决为止
 ```
 
-**循环终止条件**：`--leftover` 为空，且 AI 目检输出无混用/错用。
+**循环终止条件**：证据报告三个区块（`leftover` / `latex_units` / `mixing`）全空，且 AI 目检输出无混用/错用。三个区块是**机械正则证据**：Python 只报告"文本中存在什么"，不决定该怎么做——处置（分类、改法）始终由 AI 判定。
 
 ## 标注格式
 
@@ -69,7 +72,7 @@ Python 逐条验证，任一失败即整体拒绝（exit 1），不猜不修：
 | `math_x` | `×` 在数学公式中 | `$\times$` | `$A = l \times w$` |
 | `product` | `·` 两侧为量值/单位（整体） | LaTeX，单位正体 `\mathrm{}` | `kg·m/s`→`$\mathrm{kg}\cdot\mathrm{m}/\mathrm{s}$` |
 | `interpunct` | `·` 两侧为中文（中文间隔号） | **保留原样** | `北京·上海`→`北京·上海` |
-| `sqrt` | `√` + 参数（整体吸收） | `$\sqrt{...}$`，参数后上标吸收进根号 | `√5`→`$\sqrt{5}$`，`√x²`→`$\sqrt{x^{2}}$` |
+| `sqrt` | `√` + 参数（整体吸收） | `$\sqrt{...}$`，参数内上标转 LaTeX（单字符无花括号） | `√5`→`$\sqrt{5}$`，`√x²`→`$\sqrt{x^2}$` |
 | `punct` | Unicode 标点 | ASCII | `–`→`-`，`—`→`--`，`…`→`...` |
 | `keep` | 合法 Unicode，原样保留 | 原样 | `°`、`·`、`2024`、`Figure 1` |
 | `merge_math` | 已写好的 `$...$` 内混入 Markdown 标记/游离上标 | 合并进同一 LaTeX 环境 | `$\sum$x^2^`→`$\sum x^2$`，`$\pm$2%`→`$\pm 2\%$` |
@@ -101,7 +104,7 @@ Python 逐条验证，任一失败即整体拒绝（exit 1），不猜不修：
 - [ ] 同一公式是否既用 `$...$` 又用 `^ ^`/`~ ~`？→ 公式内统一 `^`/`_`（LaTeX），Markdown 上下标只出现在 `$...$` 外
 - [ ] 中文是否误入 LaTeX？→ `$...$` 内不应出现中文；`∑x²和y²` 应为 `$\sum x^2$和$y^2$`（`和` 是中文连词，留在文本）
 - [ ] 符号+数值是否被拆散？→ `±2%` 应为 `$\pm 2\%$`，不是 `$\pm$2%`；`kg·m/s` 应整体进 `$\mathrm{kg}\cdot\mathrm{m}/\mathrm{s}$`，不是 `kg$\cdot$m/s`
-- [ ] 运算符后是否残留 Markdown 上标？→ `∑x²` 应为 `$\sum x^2$`，不是 `$\sum$x^2^`；`√x²` 应为 `$\sqrt{x^{2}}$`
+- [ ] 运算符后是否残留 Markdown 上标？→ `∑x²` 应为 `$\sum x^2$`，不是 `$\sum$x^2^`；`√x²` 应为 `$\sqrt{x^2}$`
 - [ ] 一个完整数学表达式是否被拆成多个 LaTeX 环境？→ `∑x² - ∑y²` 应为 `$\sum x^2 - \sum y^2$`（一个环境），不是 `$\sum x^2$ - $\sum y^2$`
 - [ ] 相邻两个公式块之间是否有空格分隔？→ `$a_i$ $b_j$`，不是 `$a_i$$b_j$`
 - [ ] 数学连词结构是否正确？→ `∑ i=1 到 n` 应为 `$\sum_{i=1}^{n}$`（`到` 引入上下限）；`∑x²和y²` 的 `和` 是文本连接词（两侧各自成块）
@@ -120,7 +123,7 @@ Python 逐条验证，任一失败即整体拒绝（exit 1），不猜不修：
 | `±` | `$\pm$` | `≠` | `$\neq$` | `∫` | `$\int$` |
 | `∓` | `$\mp$` | `≈` | `$\approx$` | `∂` | `$\partial$` |
 | `·` | `$\cdot$` | `≡` | `$\equiv$` | `∇` | `$\nabla$` |
-| `−` | `$-$` | `∞` | `$\infty$` | `√` | `$\sqrt{5}$`（带参数） |
+| `−` | `-` | `∞` | `$\infty$` | `√` | `$\sqrt{5}$`（带参数） |
 | `∈` | `$\in$` | `∉` | `$\notin$` | `∀` | `$\forall$` |
 | `⊂` | `$\subset$` | `⊃` | `$\supset$` | `∃` | `$\exists$` |
 | `∪` | `$\cup$` | `∩` | `$\cap$` | `∅` | `$\emptyset$` |
@@ -138,7 +141,7 @@ Python 逐条验证，任一失败即整体拒绝（exit 1），不猜不修：
 | 公式中 `∑`/`∫`/`∏` 后表达式 | 整体吸收进一个 LaTeX 块 | `∑x²` → `$\sum x^2$`，`∫0¹ x² dx` → `$\int 0^1 x^2 dx$` |
 | `∑`/`∫`/`∏` 的上下限 | 用 `_{lower}^{upper}` | `∑ i=1 到 n` → `$\sum_{i=1}^{n}$` |
 | 完整公式含运算符 | 一个表达式 = 一个 LaTeX 环境 | `∑x² - ∑y²` → `$\sum x^2 - \sum y^2$`（不是两个 `$...$`） |
-| 上标格式 | 单字符 `^2`/`_j`，多字符 `^{10}`/`_{i=1}` | `x^2^`、`$x_{i=1}^n$`、`$\sqrt{x^{2}}$` |
+| 上标格式 | 单字符 `^2`/`_j`，多字符 `^{10}`/`_{i=1}` | `x^2^`、`$x_{i=1}^n$`、`$\sqrt{x^2}$` |
 
 ### Unicode 标点（→ ASCII）
 
@@ -157,7 +160,7 @@ Python 逐条验证，任一失败即整体拒绝（exit 1），不猜不修：
 | `×` 在数学公式中 | 用 `$\times$`（如 `$A = l \times w$`） |
 | `·` 两侧是单位/量值（`kg·m/s`、`5 · 10³`） | 整体进 LaTeX，单位正体 `\mathrm{}`（`$\mathrm{kg}\cdot\mathrm{m}/\mathrm{s}$`、`$5 \cdot 10^{3}$`） |
 | `·` 两侧是中文（`北京·上海`、`列夫·托尔斯泰`） | **中文间隔号，保留原样**（与 `，`、`。` 同属中文标点，U+00B7 合法 Unicode） |
-| `√` 后接参数（`√5`、`√x`、`√(x+1)`） | 整体进 LaTeX `$\sqrt{5}$`、`$\sqrt{x}$`、`$\sqrt{(x+1)}$`；参数后的上标**吸收进根号**（`√x²`→`$\sqrt{x^{2}}$`、`√(x+1)²`→`$\sqrt{(x+1)^{2}}$`） |
+| `√` 后接参数（`√5`、`√x`、`√(x+1)`） | 整体进 LaTeX `$\sqrt{5}$`、`$\sqrt{x}$`、`$\sqrt{(x+1)}$`；参数内上标转 LaTeX（`√x²`→`$\sqrt{x^2}$`、`√(x+1)²`→`$\sqrt{(x+1)^2}$`，单字符无花括号） |
 | `±2%` 等符号+数值 | 整体进 LaTeX `$\pm 2\%$`（`%` 须转义 `\%`，勿拆散） |
 | `∑`/`∫`/`∏` 后接表达式 | **整体吸收**进一个 LaTeX 块（`∑x²`→`$\sum x^2$`、`∫0¹ x² dx`→`$\int 0^1 x^2 dx$`）；**完整公式 = 一个环境**（`∑x² - ∑y²`→`$\sum x^2 - \sum y^2$`）；遇中文连词 `和/与/及/或` 拆块（`∑x²和y²`→`$\sum x^2$和$y^2$`）、`到/至` 转上下限（`∑ i=1 到 n`→`$\sum_{i=1}^{n}$`）；其他中文（`，`、`的`）立即中断，中文绝不放进 LaTeX |
 | `aⱼ`、`xᵢ₌₁ⁿ` 等字母下标 | 确认公式 → LaTeX `$a_j$`、`$x_{i=1}^n$`（字母/`=` 下标是数学变量标志；数字下标是单位/化学式标志） |
@@ -173,7 +176,7 @@ Python 逐条验证，任一失败即整体拒绝（exit 1），不猜不修：
 | 字符歧义（如 `·`） | 检查上下文 | 中文语境保留 `·`；其他默认 `$\cdot$` |
 | LaTeX 语法不确定 | 按表格查表转换 | 标注 `[CHECK: ???]` 询问用户 |
 | 输入无 Unicode 问题 | 原文输出 | — |
-| `--leftover` 仍有命中 | 对命中逐条补标注 → 重新 apply | 无法判断则保留并询问用户 |
+| 证据报告仍有命中（`leftover` / `latex_units` / `mixing` 任一非空） | 对命中逐条补标注 → 重新 apply | 无法判断则保留并询问用户 |
 
 ## 常见错误
 
@@ -216,10 +219,17 @@ Python 逐条验证，任一失败即整体拒绝（exit 1），不猜不修：
 # 应用标注（AI 判定后执行）：验证 → 渲染 → 应用
 python3 unicode_purify.py <input> --annotations ann.json -o out.md
 
-# 剩余非 ASCII 证据（AI 终检用）：CJK 与合法符号已过滤
-python3 unicode_purify.py out.md --leftover
+# 证据报告（AI 终检用）——无 flag = 三个区块全输出：
+#   leftover    剩余非 ASCII（CJK/合法符号已过滤）
+#   latex_units 单位/数量级被写进 LaTeX（ASCII 不可见违规）
+#   mixing      LaTeX 与纯文本混用
+python3 unicode_purify.py out.md
 
-# 机器可读报告（含 output + leftover）
+# 只看某一类证据（互斥区块选择器）
+python3 unicode_purify.py out.md --leftover    # 仅剩余非 ASCII
+python3 unicode_purify.py out.md --mixing      # 仅 latex_units + mixing
+
+# 机器可读报告（含 output + leftover + latex_units + mixing）
 python3 unicode_purify.py <input> --annotations ann.json --json
 
 # 输入 "-" 从 stdin 读取

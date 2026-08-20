@@ -7,7 +7,12 @@ input text, finds every problem (Unicode special chars, LaTeX/Markdown mixing,
 misused forms such as units/chemical formulas in math), classifies each with a
 `kind`, and writes an annotation file. This script validates those annotations
 mechanically, renders each replacement from lookup tables, and applies it.
-It never scans, detects, or classifies.
+It never classifies, decides a fix, or invents a replacement.
+
+In addition to execution, it can list factual evidence for the AI's terminal
+check: remaining non-ASCII characters and regex-matched LaTeX-unit misuse /
+LaTeX+plain-text mixing. These scans only report what is present in the text
+(mechanical pattern matches); they never decide what the AI should do.
 
 Loop (until all problems are resolved):
   1. AI: read <input>; classify every problem; write annotations.json
@@ -31,7 +36,9 @@ Kinds (AI classifies; Python renders mechanically):
 
 Usage:
   python3 unicode_purify.py <input> --annotations ann.json -o out.md [--json]
-  python3 unicode_purify.py <input> --leftover    # factual non-ASCII listing
+  python3 unicode_purify.py <input> --leftover    # only remaining non-ASCII evidence
+  python3 unicode_purify.py <input> --mixing      # only LaTeX-unit + mixing evidence
+  python3 unicode_purify.py <input>               # all evidence sections
 """
 
 from __future__ import annotations
@@ -153,7 +160,7 @@ def _render_markdown_sub(scope: str) -> str:
 
 
 def _render_math_super_sub(scope: str) -> str:
-    """aⱼ → $a_j$, xᵢ₌₁ⁿ → $x_{i=1}^{n}$ (letter/= super/sub → LaTeX)."""
+    """aⱼ → $a_j$, xᵢ₌₁ⁿ → $x_{i=1}^n$ (letter/= super/sub → LaTeX)."""
     return "$" + convert_math_mode(scope) + "$"
 
 
@@ -169,7 +176,7 @@ def _render_greek_text(scope: str) -> str:
 
 
 def _render_greek_prefix_math(scope: str) -> str:
-    """ΔLOO-IC → $\\Delta\\mathrm{LOO\\text{-}IC}$; δ¹³C → $\\delta^{13}\\mathrm{C}$."""
+    """ΔLOO-IC → $\\Delta\\mathrm{LOO\\text{-}IC}$; δ¹³C → $\\delta^{13}{\\mathrm{C}}$."""
     ch, ident = scope[0], scope[1:]
     suffix = _ident_to_math(ident)
     sep = " " if suffix[:1].isalpha() else ""  # \Delta T, never \DeltaT
@@ -232,8 +239,9 @@ def _render_interpunct(scope: str) -> str:
 
 
 def _render_sqrt(scope: str) -> str:
-    """√5 → $\\sqrt{5}$ (whole argument absorbed)."""
-    return r"$\sqrt{" + scope[1:] + "}$"
+    """√5 → $\sqrt{5}$; √x² → $\sqrt{x^2}$ (whole argument absorbed and
+    converted, so Unicode super/sub inside the radical cannot survive)."""
+    return r"$\sqrt{" + convert_math_mode(scope[1:]) + "}$"
 
 
 def _render_punct(scope: str) -> str:
@@ -396,9 +404,6 @@ def _is_cjk(ch: str) -> bool:
 
 
 def leftover_nonascii(text: str) -> list[dict]:
-    """Factual listing of non-ASCII characters that could need conversion
-    (excluding CJK and valid symbols) — evidence for the AI's final check,
-    not judgment."""
     hits = []
     for m in re.finditer(r"[^\x00-\x7f]", text):
         ch = m.group(0)
@@ -406,10 +411,127 @@ def leftover_nonascii(text: str) -> list[dict]:
             continue
         hits.append({
             "offset": m.start(),
+            "category": "non_ascii",
             "char": ch,
             "code_point": f"U+{ord(ch):04X}",
             "context": text[max(0, m.start() - 25):m.start() + 25].replace("\n", " "),
         })
+    return hits
+
+
+# --------------------------------------------------------------------------
+# LaTeX-unit detection: ASCII-only violations invisible to --leftover
+# --------------------------------------------------------------------------
+
+_UNIT_WORDS = (
+    r"(?:yr|y|d|day|h|min|s|L|l|mL|ml|kg|g|mg|ppm|ppb|pp|M|m|mm|cm|km|ha"
+    r"|person|cap|capita|dwelling|unit|household|t|T|CNY|USD|EUR)"
+)
+
+# unit + LaTeX superscript: yr$^{-1}$, m$^2$, d$^{-1}$
+_RE_UNIT_LATEX_SUP = re.compile(
+    _UNIT_WORDS + r"""\$\^(\{[^}]+\}|[^^${}\\])\$""")
+
+# number + LaTeX superscript: 10$^{3}$, 2.8$^{3}$
+_RE_NUM_LATEX_SUP = re.compile(
+    r"""\b(\d+(?:\.\d+)?)\$\^(\{[^}]+\}|[^^${}\\])\$""")
+
+# dimension with LaTeX \times: m $\times$ m
+_RE_DIM_TIMES = re.compile(
+    r"""(\d+(?:\.\d+)?\s*(?:m|cm|mm|ft|in))\s*\$\\times\$\s*(\d+(?:\.\d+)?)""")
+
+_UNIT_PATTERNS = [
+    ("latex_unit", _RE_UNIT_LATEX_SUP,
+     "unit + LaTeX superscript (e.g. yr$^{-1}$ -> yr^-1^)"),
+    ("latex_unit", _RE_NUM_LATEX_SUP,
+     "number + LaTeX superscript (e.g. 10$^{3}$ -> 10^3^)"),
+    ("latex_unit", _RE_DIM_TIMES,
+     "dimension with LaTeX \\times (e.g. m $\\times$ m -> m x m)"),
+]
+
+
+def check_latex_units(text: str) -> list[dict]:
+    hits: list[dict] = []
+    seen: set[tuple[int, int]] = set()
+
+    for cat, pattern, desc in _UNIT_PATTERNS:
+        for m in pattern.finditer(text):
+            span = (m.start(), m.end())
+            if span in seen:
+                continue
+            seen.add(span)
+            hits.append({
+                "offset": m.start(),
+                "category": cat,
+                "match": m.group(0),
+                "suggestion": desc,
+                "context": text[max(0, m.start() - 40):m.end() + 40].replace("\n", " "),
+            })
+
+    # \times preceded by unit-like context (m, cm, etc.)
+    for m in re.finditer(r"""\$\times\$""", text):
+        span = (m.start(), m.end())
+        if span in seen:
+            continue
+        before = text[max(0, m.start() - 15):m.start()]
+        if re.search(r"(?:m|cm|mm|ft)\s*$", before):
+            seen.add(span)
+            hits.append({
+                "offset": m.start(),
+                "category": "latex_unit",
+                "match": m.group(0),
+                "suggestion": "dimension with LaTeX \\times in unit context (m $\\times$ m -> m x m)",
+                "context": text[max(0, m.start() - 40):m.end() + 40].replace("\n", " "),
+            })
+
+    hits.sort(key=lambda h: h["offset"])
+    return hits
+
+
+# --------------------------------------------------------------------------
+# Mixing detection: LaTeX + plain text in the same expression
+# --------------------------------------------------------------------------
+
+_MIXING_PATTERNS = [
+    # 1. LaTeX expression = number (equals sign outside $)
+    ("latex_eq_num",
+     re.compile(r"""\$[^$]+\$\s*=\s*[0-9]"""),
+     "LaTeX expression = number (should be one $ block)"),
+    # 2. Number before LaTeX operator (value split from operator)
+    ("latex_split",
+     re.compile(r"""\b[0-9]+(?:\.[0-9]+)?\s*\$\\[a-z]+\$"""),
+     "number + LaTeX operator split (e.g. 1.840 $\\pm 0.2\\%$ -> $1.840 \\pm 0.2\\%$)"),
+    # 3. LaTeX operator between plain text (CN $\ge$ 90 pattern)
+    ("latex_in_text",
+     re.compile(r"""[A-Za-z]\$\\[a-z]+\$[0-9A-Za-z]"""),
+     "LaTeX operator between plain text (e.g. CN $\\ge$ 90 -> $CN \\ge 90$)"),
+    # 4. Arrow/approx before LaTeX operator
+    ("latex_after_arrow",
+     re.compile(r"""->\s*\$\\approx\$\s*[0-9]"""),
+     "plain arrow + LaTeX approx (e.g. -> $\\approx$ 48% -> $\\approx 48\\%$)"),
+]
+
+
+def check_mixing(text: str) -> list[dict]:
+    """Detect LaTeX + plain text mixing in the same expression."""
+    hits: list[dict] = []
+    seen: set[tuple[int, int]] = set()
+
+    for cat, pattern, desc in _MIXING_PATTERNS:
+        for m in pattern.finditer(text):
+            span = (m.start(), m.end())
+            if span in seen:
+                continue
+            seen.add(span)
+            hits.append({
+                "offset": m.start(),
+                "category": cat,
+                "match": m.group(0),
+                "suggestion": desc,
+                "context": text[max(0, m.start() - 40):m.end() + 40].replace("\n", " "),
+            })
+
+    hits.sort(key=lambda h: h["offset"])
     return hits
 
 
@@ -605,7 +727,9 @@ def main() -> int:
     ap.add_argument("--json", action="store_true",
                     help="print machine-readable JSON report instead of text")
     ap.add_argument("--leftover", action="store_true",
-                    help="list remaining non-ASCII chars as factual evidence")
+                    help="evidence report: only remaining non-ASCII section")
+    ap.add_argument("--mixing", action="store_true",
+                    help="evidence report: only latex_units + mixing sections")
     args = ap.parse_args()
 
     if args.input == "-":
@@ -620,8 +744,17 @@ def main() -> int:
         src_name = str(src)
 
     if args.annotations is None:
-        # Pure evidence mode: list non-ASCII characters for the AI's check.
-        report = {"source": src_name, "leftover": leftover_nonascii(text)}
+        # Evidence report (AI terminal check). Flags select which sections to
+        # show; no flag = all sections. --leftover = non-ASCII leftovers only;
+        # --mixing = LaTeX-unit misuse + LaTeX/plain mixing only.
+        show_leftover = not args.mixing
+        show_mixing = not args.leftover
+        report = {"source": src_name}
+        if show_leftover:
+            report["leftover"] = leftover_nonascii(text)
+        if show_mixing:
+            report["latex_units"] = check_latex_units(text)
+            report["mixing"] = check_mixing(text)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0
 
@@ -653,6 +786,8 @@ def main() -> int:
             "applied": len(annotations),
             "output": converted,
             "leftover": leftover_nonascii(converted),
+            "latex_units": check_latex_units(converted),
+            "mixing": check_mixing(converted),
         }, ensure_ascii=False, indent=2))
     elif args.output:
         Path(args.output).write_text(converted, encoding="utf-8")
