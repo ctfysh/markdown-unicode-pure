@@ -319,6 +319,34 @@ def _render_letter_sub_math(scope: str) -> str:
     return "$" + convert_math_mode(inner) + "$"
 
 
+def _render_scientific(scope: str) -> str:
+    """科学计数法数字 → LaTeX: 1.5×10³ → $1.5 \\times 10^3$ (指数无花括号),
+    1.5×10^{3} → $1.5 \\times 10^{3}$ (多字符指数保留花括号)."""
+    # 匹配数字 + 乘号 + 10 的幂次 (带花括号形式)
+    m = re.match(r"([\d.]+)\s*[×·]\s*10\^(\{[^}]+\})", scope)
+    if m:
+        coeff = m.group(1)
+        exp_braces = m.group(2)  # 如 {3} 或 {12}
+        return f"${coeff} \\times 10^{exp_braces}$"
+    
+    # 匹配数字 + 乘号 + 10 的幂次 (无花括号形式)
+    m = re.match(r"([\d.]+)\s*[×·]\s*10\^?(\d+)", scope)
+    if m:
+        coeff = m.group(1)
+        exp = m.group(2)
+        return f"${coeff} \\times 10^{exp}$" if len(exp) == 1 else f"${coeff} \\times 10^{{{exp}}}$"
+    
+    # 尝试匹配 Unicode 上标形式: 1.5×10³
+    m = re.match(r"([\d.]+)\s*[×·]\s*10([⁰¹²³⁴⁵⁶⁷⁸⁹]+)", scope)
+    if m:
+        coeff = m.group(1)
+        exp_chars = m.group(2)
+        exp = "".join(SUPERSCRIPT_MAP.get(c, c) for c in exp_chars)
+        return f"${coeff} \\times 10^{exp}$" if len(exp) == 1 else f"${coeff} \\times 10^{{{exp}}}$"
+    
+    return scope
+
+
 RENDERERS = {
     "markdown_super": _render_markdown_super,
     "markdown_sub": _render_markdown_sub,
@@ -344,6 +372,7 @@ RENDERERS = {
     "unit_to_md": _render_unit_to_md,
     "ordinal_plain": _render_ordinal_plain,
     "letter_sub_math": _render_letter_sub_math,
+    "scientific": _render_scientific,
 }
 
 
